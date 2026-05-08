@@ -386,7 +386,7 @@ void test_mixer_adv(void) {
 /* ================================================================
  * Stress test: 31 PCM voices + OPL3 simultaneously
  *
- * This simulates a worst-case Duke3D scenario: many SFX playing
+ * This simulates a worst-case game-audio scenario: many SFX playing
  * while MIDI music runs on OPL3. Tests mixer FSM timing budget,
  * CRAM1 bus bandwidth, and audio FIFO underrun.
  * ================================================================ */
