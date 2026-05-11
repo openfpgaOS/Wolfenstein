@@ -1,12 +1,13 @@
 /*
  * of_awe.h -- AWE audio coprocessor API for openfpgaOS (retired).
  *
- * The AWE fabric coprocessor was retired; the CPU-side sample voice
- * engine (of_smp_voice) drives the hardware mixer directly.  This header
+ * The AWE fabric coprocessor was retired; the CPU-side software voice
+ * engine (of_smp_voice) drives the software mixer directly.  This header
  * is preserved for source compatibility with SDK apps that still reference
  * the AWE API — every entry point is a no-op inline stub.
  *
- * Apps that want polyphonic SF2/MIDI should use of_midi.h + of_smp_voice.
+ * Apps that want polyphonic SF2/MIDI should use of_midi.h + of_smp_voice,
+ * which now run entirely on the CPU.
  */
 
 #ifndef OF_AWE_H

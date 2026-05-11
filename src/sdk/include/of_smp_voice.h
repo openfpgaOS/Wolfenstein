@@ -3,7 +3,7 @@
  *
  * Manages simultaneous sample voices with DAHDSR envelopes and dual
  * LFOs, driving the hardware mixer.  All math is fixed-point Q16.16;
- * advances in 1 kHz logical ticks dispatched by the MIDI pump ISR.
+ * runs in the 1 kHz timer ISR on RV32IMFC.
  */
 
 #ifndef OF_SMP_VOICE_H
@@ -16,12 +16,12 @@ extern "C" {
 #include <stdint.h>
 #include "of_smp_bank.h"
 
-/* Cut from 28→12 so smp_voice_tick's ISR loop finishes fast enough
- * for Doom's renderer to get the CPU back.  Dense MIDI passages lose
- * the quietest couple of voices to the stealer; audible but acceptable
- * tradeoff.  Sits well under OF_MIXER_MAX_VOICES (32) so the allocator
- * never has to re-steal. */
+/* Conservative SDK default.  Apps with their own BRAM budget can raise this
+ * at compile time, as long as they stay below OF_MIXER_MAX_VOICES (32) and
+ * keep smp_voice_tick comfortably inside the 1 kHz timer budget. */
+#ifndef SMP_MAX_VOICES
 #define SMP_MAX_VOICES 12
+#endif
 
 typedef enum {
     ENV_OFF = 0, ENV_DELAY, ENV_ATTACK, ENV_HOLD,
@@ -57,11 +57,6 @@ typedef struct {
     lfo_state_t mod_lfo;
     lfo_state_t vib_lfo;
     uint32_t base_rate_fp16; /* base 16.16 playback rate (no bend/LFO) */
-    int16_t cur_filter_fc;
-    int16_t cur_filter_q;
-    uint16_t cur_cutoff_hw;   /* last HW FC value written (skip redundant writes
-                                 from fine-grained cents changes that round to
-                                 the same Q0.16 HW cutoff) */
     uint32_t age;
     /* Countdown of smp_voice_tick calls until the underlying non-looping
      * sample has played to its natural end.  0 = not tracked (looping
@@ -84,7 +79,7 @@ void smp_voice_init(void);
 int  smp_voice_note_on(const ofsf_zone_t *zone, int midi_ch, int note,
                        int velocity, const void *sample_base);
 void smp_voice_note_off(int midi_ch, int note);
-void smp_voice_tick(void);  /* one 1 kHz logical tick */
+void smp_voice_tick(void);  /* 1 kHz ISR */
 
 /* Diagnostic stats for smp_voice_tick cost.  Task #10 probe: detect
  * whether a 1 kHz voice tick exceeds the 2 ms pump cap.
@@ -145,8 +140,8 @@ void smp_voice_update_bend(int midi_ch, int bend);
 void smp_voice_update_mod(int midi_ch, int mod_depth);
 void smp_voice_update_sustain(int midi_ch, int sustain_on);
 void smp_voice_update_filter(int midi_ch, int brightness, int resonance);
-/* CC91 (reverb send) and CC93 (chorus send), 0..127 -- stored per channel
- * but not yet acted on (the hardware mixer has no per-voice send paths). */
+/* CC91 (reverb send) and CC93 (chorus send), 0..127 — stored per channel
+ * but not yet acted on (the CPU mixer has no per-voice send paths). */
 void smp_voice_update_reverb_send(int midi_ch, int send_0_127);
 void smp_voice_update_chorus_send(int midi_ch, int send_0_127);
 void smp_voice_all_off(int midi_ch);
@@ -154,8 +149,8 @@ void smp_voice_all_off_global(void);
 void smp_voice_set_master_volume(int vol);
 
 /* AWE-backend redirect (retired).  Preserved as ABI no-ops so existing
- * SDK apps that enable/query the AWE path still link; the CPU-side
- * sample voice engine is the only backend now. */
+ * SDK apps that enable/query the AWE path still link; the CPU-side SW
+ * voice engine is the only backend now. */
 void smp_voice_enable_awe_backend(int on);
 int  smp_voice_awe_backend_enabled(void);
 
