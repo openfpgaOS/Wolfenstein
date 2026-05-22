@@ -202,10 +202,10 @@ static void raw_play_inst(int idx, int note) {
            note, bank, program, n);
 
     for (int i = 0; i < n; i++) {
-        const int16_t *sample_ptr = (const int16_t *)(sbase + zones[i]->sample_offset);
+        const uint8_t *sample_ptr = sbase + zones[i]->sample_offset;
         uint32_t sample_count = zones[i]->sample_length;
         uint32_t sample_bytes = sample_count * sizeof(int16_t);
-        const int16_t *play_ptr = sample_ptr;
+        const uint8_t *play_ptr = sample_ptr;
 
         if (raw_use_copy) {
             int16_t *copy_buf = raw_copy_buf_get(i);
@@ -214,10 +214,10 @@ static void raw_play_inst(int idx, int note) {
                 continue;
             }
             memcpy(copy_buf, sample_ptr, sample_bytes);
-            play_ptr = copy_buf;
+            play_ptr = (const uint8_t *)copy_buf;
         }
 
-        int v = of_mixer_play((const uint8_t *)play_ptr,
+        int v = of_mixer_play(play_ptr,
                               sample_count,
                               hdr->sample_rate,
                               0, 220);

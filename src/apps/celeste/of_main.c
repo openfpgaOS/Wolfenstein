@@ -76,6 +76,10 @@ static Mix_Chunk *sfx_bank[CELESTE_SFX_NUM];
 static uint8_t   *sfx_blob;       /* whole file kept around while WAV chunks parse */
 static int        sfx_loaded;     /* count of clips successfully decoded */
 
+static int16_t read_s16le(const uint8_t *p) {
+    return (int16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
 /* ======================================================================
  * Globals — SDL2 owns the window, we just keep the surface handle for
  * the per-frame draw helpers that need pixels[].
@@ -179,10 +183,9 @@ static Mix_Chunk *make_chunk_from_wav(const uint8_t *wav, uint32_t size) {
 
     /* PC uses the real SDL_mixer path opened as signed 16-bit mono. */
     if (result.bits_per_sample == 16) {
-        const int16_t *s = (const int16_t *)result.pcm;
         int step = result.channels;
         for (uint32_t i = 0; i < num_samples; i++)
-            pcm_s16[i] = s[i * step];
+            pcm_s16[i] = read_s16le(result.pcm + (i * step * 2));
     } else {
         int step = result.channels;
         for (uint32_t i = 0; i < num_samples; i++)
@@ -204,10 +207,9 @@ static Mix_Chunk *make_chunk_from_wav(const uint8_t *wav, uint32_t size) {
 
     /* Pocket SFX live in the SDRAM sample pool used by the hardware mixer. */
     if (result.bits_per_sample == 16) {
-        const int16_t *s = (const int16_t *)result.pcm;
         int step = result.channels;
         for (uint32_t i = 0; i < num_samples; i++)
-            pcm_s16[i] = s[i * step];
+            pcm_s16[i] = read_s16le(result.pcm + (i * step * 2));
     } else {
         int step = result.channels;
         for (uint32_t i = 0; i < num_samples; i++)

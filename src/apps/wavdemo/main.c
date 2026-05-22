@@ -64,6 +64,9 @@ typedef struct {
 static uint16_t read16(const uint8_t *p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
+static int16_t read_s16(const uint8_t *p) {
+    return (int16_t)read16(p);
+}
 static uint32_t read32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -178,8 +181,10 @@ int main(void) {
     for (uint32_t i = 0; i < total_samples; i++) {
         int16_t s;
         if (wav.bits_per_sample == 16) {
-            const int16_t *pcm = (const int16_t *)(wav.data + i * wav.block_align);
-            s = (wav.channels >= 2) ? (int16_t)(((int32_t)pcm[0] + pcm[1]) >> 1) : pcm[0];
+            const uint8_t *pcm = wav.data + i * wav.block_align;
+            int16_t l = read_s16(pcm);
+            int16_t r = (wav.channels >= 2) ? read_s16(pcm + 2) : l;
+            s = (wav.channels >= 2) ? (int16_t)(((int32_t)l + r) >> 1) : l;
         } else {
             const uint8_t *pcm = wav.data + i * wav.block_align;
             s = (wav.channels >= 2)
@@ -197,8 +202,10 @@ int main(void) {
     for (uint32_t i = 0; i < total_samples; i++) {
         int16_t exp;
         if (wav.bits_per_sample == 16) {
-            const int16_t *pcm = (const int16_t *)(wav.data + i * wav.block_align);
-            exp = (wav.channels >= 2) ? (int16_t)(((int32_t)pcm[0] + pcm[1]) >> 1) : pcm[0];
+            const uint8_t *pcm = wav.data + i * wav.block_align;
+            int16_t l = read_s16(pcm);
+            int16_t r = (wav.channels >= 2) ? read_s16(pcm + 2) : l;
+            exp = (wav.channels >= 2) ? (int16_t)(((int32_t)l + r) >> 1) : l;
         } else {
             const uint8_t *pcm = wav.data + i * wav.block_align;
             exp = (wav.channels >= 2)
