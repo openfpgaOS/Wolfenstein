@@ -1,0 +1,74 @@
+{
+    "data": {
+        "magic": "APF_VER_1",
+        "data_slots": [
+            {
+                "id": 0,
+                "name": "Game",
+                "required": true,
+                "parameters": 275,
+                "extensions": ["json"]
+            },
+            {
+                "id": 1,
+                "name": "OS Binary",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["bin"],
+                "deferload": true
+            },
+            {
+                "id": 2,
+                "name": "Application",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["elf"],
+                "deferload": true
+            },
+            {
+                "id": 4,
+                "name": "Sound Bank",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["ofsf"],
+                "deferload": true
+            },
+            {
+                "id": 14,
+                "name": "CUE Sheet",
+                "required": true,
+                "parameters": 0,
+                "extensions": ["cue"],
+                "deferload": true
+            },
+            {
+                "id": 15,
+                "name": "BIN Disc Image",
+                "required": true,
+                "parameters": 0,
+                "extensions": ["bin"],
+                "deferload": true
+            },
+            {
+                "id": 20,
+                "name": "Settings",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "address": "0x200C0000",
+                "size_maximum": "0x40000",
+                "extensions": ["cfg", "bin"]
+            },
+            { "id": 21, "name": "Save 0", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x20100000", "size_maximum": "0x40000", "extensions": ["ecs", "sav", "bin"] },
+            { "id": 22, "name": "Save 1", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x20140000", "size_maximum": "0x40000", "extensions": ["ecs", "sav", "bin"] },
+            { "id": 23, "name": "Save 2", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x20180000", "size_maximum": "0x40000", "extensions": ["ecs", "sav", "bin"] },
+            { "id": 24, "name": "Save 3", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x201C0000", "size_maximum": "0x40000", "extensions": ["ecs", "sav", "bin"] },
+            { "id": 25, "name": "Save 4", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x20200000", "size_maximum": "0x40000", "extensions": ["ecs", "sav", "bin"] },
+            { "id": 26, "name": "Save 5", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x20240000", "size_maximum": "0x40000", "extensions": ["ecs", "sav", "bin"] },
+            { "id": 27, "name": "Save 6", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x20280000", "size_maximum": "0x40000", "extensions": ["ecs", "sav", "bin"] },
+            { "id": 28, "name": "Save 7", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x202C0000", "size_maximum": "0x40000", "extensions": ["ecs", "sav", "bin"] },
+            { "id": 29, "name": "Save 8", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x20300000", "size_maximum": "0x40000", "extensions": ["ecs", "sav", "bin"] },
+            { "id": 30, "name": "Save 9", "required": false, "parameters": "0x84", "nonvolatile": true, "address": "0x20340000", "size_maximum": "0x40000", "extensions": ["ecs", "sav", "bin"] }
+        ]
+    }
+}

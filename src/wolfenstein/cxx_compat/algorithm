@@ -1,0 +1,47 @@
+#ifndef OF_CXX_COMPAT_ALGORITHM
+#define OF_CXX_COMPAT_ALGORITHM
+
+namespace std {
+template<class T>
+inline void swap(T &a, T &b)
+{
+    T tmp = a;
+    a = b;
+    b = tmp;
+}
+
+template<class T>
+inline const T &min(const T &a, const T &b)
+{
+    return b < a ? b : a;
+}
+
+template<class T>
+inline const T &max(const T &a, const T &b)
+{
+    return a < b ? b : a;
+}
+
+template<class RandomIt, class Compare>
+void sort(RandomIt first, RandomIt last, Compare comp)
+{
+    for (RandomIt i = first; i != last; ++i)
+    {
+        for (RandomIt j = i; j != last; ++j)
+        {
+            if (comp(*j, *i))
+                swap(*i, *j);
+        }
+    }
+}
+
+template<class InputIt, class OutputIt>
+OutputIt copy(InputIt first, InputIt last, OutputIt d_first)
+{
+    for (; first != last; ++first, ++d_first)
+        *d_first = *first;
+    return d_first;
+}
+}
+
+#endif

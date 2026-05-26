@@ -1,0 +1,27 @@
+#ifndef OF_CXX_COMPAT_STRING
+#define OF_CXX_COMPAT_STRING
+
+#include <string.h>
+
+namespace std {
+class string {
+public:
+    static const unsigned long npos = (unsigned long)-1;
+
+    string() : data_("") {}
+    string(const char *s) : data_(s ? s : "") {}
+
+    const char *c_str() const { return data_; }
+    unsigned long find(const char *s, unsigned long pos = 0) const
+    {
+        const char *start = data_ + pos;
+        const char *found = strstr(start, s ? s : "");
+        return found ? (unsigned long)(found - data_) : npos;
+    }
+
+private:
+    const char *data_;
+};
+}
+
+#endif

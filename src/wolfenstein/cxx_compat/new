@@ -1,0 +1,15 @@
+#ifndef OF_CXX_COMPAT_NEW
+#define OF_CXX_COMPAT_NEW
+
+#include <stddef.h>
+
+namespace std {
+class bad_alloc {};
+}
+
+inline void *operator new(size_t, void *p) noexcept { return p; }
+inline void *operator new[](size_t, void *p) noexcept { return p; }
+inline void operator delete(void *, void *) noexcept {}
+inline void operator delete[](void *, void *) noexcept {}
+
+#endif

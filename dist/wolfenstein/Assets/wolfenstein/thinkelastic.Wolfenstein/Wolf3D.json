@@ -1,0 +1,24 @@
+{
+    "instance": {
+        "magic": "APF_VER_1",
+        "variant_select": { "id": 666, "select": false },
+        "data_slots": [
+            { "id": 1, "filename": "os.bin" },
+            { "id": 2, "filename": "wolfenstein.elf" },
+            { "id": 4, "filename": "bank.ofsf" },
+            { "id": 14, "filename": "Wolfenstein3D.cue" },
+            { "id": 15, "filename": "Wolfenstein3D.bin" },
+            { "id": 20, "filename": "ecwolf.cfg" },
+            { "id": 21, "filename": "savegam0.ecs" },
+            { "id": 22, "filename": "savegam1.ecs" },
+            { "id": 23, "filename": "savegam2.ecs" },
+            { "id": 24, "filename": "savegam3.ecs" },
+            { "id": 25, "filename": "savegam4.ecs" },
+            { "id": 26, "filename": "savegam5.ecs" },
+            { "id": 27, "filename": "savegam6.ecs" },
+            { "id": 28, "filename": "savegam7.ecs" },
+            { "id": 29, "filename": "savegam8.ecs" },
+            { "id": 30, "filename": "savegam9.ecs" }
+        ]
+    }
+}

@@ -1,0 +1,11 @@
+[submodule "deps/SDL"]
+	path = deps/SDL
+	url = ../sdl.git
+
+[submodule "deps/SDL_mixer"]
+	path = deps/SDL_mixer
+	url = ../sdl_mixer-for-ecwolf.git
+
+[submodule "deps/SDL_net"]
+	path = deps/SDL_net
+	url = ../sdl_net.git
