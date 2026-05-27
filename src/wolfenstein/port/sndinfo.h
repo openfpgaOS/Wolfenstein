@@ -72,7 +72,7 @@ class SoundData
 		~SoundData();
 
 		byte* GetAdLibData() const { return adlibData; }
-		Mix_Chunk *GetDigitalData() const { return digitalData; }
+		Mix_Chunk *GetDigitalData() const;
 		unsigned short GetPriority() const { return priority; }
 		byte* GetSpeakerData() const { return speakerData; }
 		bool HasType(Type type=ADLIB) const { return lump[type] != -1; }
@@ -85,7 +85,7 @@ class SoundData
 	protected:
 		FString logicalName;
 		SoundIndex index;
-		TUniquePtr<Mix_Chunk, Mix_ChunkDeleter> digitalData;
+		mutable TUniquePtr<Mix_Chunk, Mix_ChunkDeleter> digitalData;
 		TUniquePtr<byte[]> adlibData, speakerData;
 		int lump[3];
 		unsigned short priority;
@@ -105,6 +105,8 @@ class SoundInformation
 
 		SoundIndex		FindSound(const char* logical) const;
 		void			Init();
+		SoundIndex		PumpDigitalLoads(int maxLoads=1);
+		void			QueueDigitalLoad(const SoundIndex &index);
 		const SoundData	&operator[] (const char* logical) const { return operator[](FindSound(logical)); }
 		const SoundData	&operator[] (const SoundIndex &index) const;
 		uint32_t		GetLastPlayTick(const SoundData &sound) const { return lastPlayTicks[sound.index]; }
@@ -126,6 +128,7 @@ class SoundInformation
 		SoundData			nullIndex;
 		TArray<SoundData>	sounds;
 		TArray<uint32_t>	lastPlayTicks;
+		TArray<SoundIndex>	digitalLoadQueue;
 		TMap<FName, MusicData> MusicAliases;
 
 		struct HashIndex;

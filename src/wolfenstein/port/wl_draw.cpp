@@ -415,9 +415,9 @@ void HitVertWall (void)
 
 	MapSpot adj = tilehit->GetAdjacent(hitdir);
 	if (adj && adj->tile && adj->tile->offsetHorizontal && !adj->tile->offsetVertical) // check for adjacent doors
-		source = TexMan(adj->texture[hitdir]);
+		source = TexMan(adj->GetTexture(hitdir));
 	else
-		source = TexMan(tilehit->texture[hitdir]);
+		source = TexMan(tilehit->GetTexture(hitdir));
 
 	if(source)
 	{
@@ -489,9 +489,9 @@ void HitHorizWall (void)
 
 	MapSpot adj = tilehit->GetAdjacent(hitdir);
 	if (adj && adj->tile && adj->tile->offsetVertical && !adj->tile->offsetHorizontal) // check for adjacent doors
-		source = TexMan(adj->texture[hitdir]);
+		source = TexMan(adj->GetTexture(hitdir));
 	else
-		source = TexMan(tilehit->texture[hitdir]);
+		source = TexMan(tilehit->GetTexture(hitdir));
 
 	if(source)
 	{

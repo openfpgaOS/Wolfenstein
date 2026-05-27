@@ -696,8 +696,7 @@ struct HolowallProducer
 		MapSpot nextSpot = spot->GetAdjacent(facing);
 		if(spot->tile)
 		{
-			spot->sideSolid[0] = spot->sideSolid[1] =
-				spot->sideSolid[2] = spot->sideSolid[3] = false;
+			spot->SetAllSidesSolid(false);
 		}
 
 		// Pathing objects can make statics and walls in front of them non-solid
@@ -705,8 +704,7 @@ struct HolowallProducer
 		{
 			if(nextSpot->tile)
 			{
-				nextSpot->sideSolid[0] = nextSpot->sideSolid[1] =
-					nextSpot->sideSolid[2] = nextSpot->sideSolid[3] = false;
+				nextSpot->SetAllSidesSolid(false);
 			}
 
 			fixed x = nextSpot->GetX(), y = nextSpot->GetY();

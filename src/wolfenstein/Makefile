@@ -84,6 +84,8 @@ SRCS_CXX = $(ECWOLF_CXX_SRCS) $(OF_ECWOLF_CD_SRC) $(OF_ECWOLF_CXXABI_SRC) $(OF_C
 
 include $(SDK_DIR)/sdk.mk
 
+STRIP ?= $(CROSS)strip
+
 # ECWolf uses C++ exceptions for fatal/recoverable startup and resource errors.
 # Keep the SDK's musl runtime, but pull in libsupc++ for the EH machinery.
 LIBS = -Wl,--undefined=__register_frame_info \
@@ -119,7 +121,8 @@ release: $(OBJ_DIR)/app.elf
 	@mkdir -p $$(ls -d $(OUT)/Assets/*/)/common
 	@cp $(RUNTIME)/os.bin $$(ls -d $(OUT)/Assets/*/)/common/
 	@cp $(RUNTIME)/bank.ofsf $$(ls -d $(OUT)/Assets/*/)/common/ 2>/dev/null || true
-	@cp $< $$(ls -d $(OUT)/Assets/*/)/common/$(APP).elf
+	@common=$$(ls -d $(OUT)/Assets/*/)/common; \
+		$(STRIP) -o $$common/$(APP).elf $<
 	@for f in *.wl1 *.WL1 *.wl6 *.WL6 *.sod *.SOD *.sdm *.SDM *.sd2 *.SD2 *.sd3 *.SD3 *.n3d *.N3D *.pk3 *.PK3 *.ecwolf *.ECWOLF *.cue *.CUE *.bin *.BIN; do [ -f "$$f" ] && cp "$$f" $$(ls -d $(OUT)/Assets/*/)/common/; done 2>/dev/null; true
 	@echo "Ready: build/$(APP)/"
 

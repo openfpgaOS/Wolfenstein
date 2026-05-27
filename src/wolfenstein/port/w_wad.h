@@ -138,7 +138,7 @@ public:
 	FString GetString () { return Block == NULL ? FString() : FString((const char *)Block, Size); }
 
 private:
-	FMemLump (size_t size);
+	FMemLump (size_t size, int lump = -1, const char *name = NULL, const char *wadname = NULL);
 
 	void *Block;
 	size_t Size;

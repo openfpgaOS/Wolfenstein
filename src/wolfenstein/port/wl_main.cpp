@@ -1176,6 +1176,12 @@ static const char* CheckParameters(int argc, char *argv[], TArray<FString> &file
 		Quit();
 	}
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	screenWidth = 320;
+	screenHeight = 240;
+	fullscreen = false;
+#endif
+
 	r_ratio = static_cast<Aspect>(CheckRatio(screenWidth, screenHeight));
 
 	if(sampleRateGiven && !audioBufferGiven)

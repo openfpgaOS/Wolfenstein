@@ -77,6 +77,11 @@ SoundData::~SoundData()
 {
 }
 
+Mix_Chunk *SoundData::GetDigitalData() const
+{
+	return digitalData;
+}
+
 template<>
 struct TMoveInsert<SoundData>
 {
@@ -202,6 +207,54 @@ void SoundInformation::CreateHashTable()
 
 		tid->index = i;
 	}
+}
+
+void SoundInformation::QueueDigitalLoad(const SoundIndex &index)
+{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	int soundIndex = index;
+	if(soundIndex <= 0 || (unsigned int)soundIndex >= sounds.Size())
+		return;
+
+	SoundData &data = sounds[soundIndex];
+	if(data.lump[SoundData::DIGITAL] == -1 || data.digitalData)
+		return;
+
+	for(unsigned int i = 0;i < digitalLoadQueue.Size();++i)
+	{
+		if((int)digitalLoadQueue[i] == soundIndex)
+			return;
+	}
+	digitalLoadQueue.Push(index);
+#else
+	(void)index;
+#endif
+}
+
+SoundIndex SoundInformation::PumpDigitalLoads(int maxLoads)
+{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	SoundIndex loaded;
+	while(maxLoads-- > 0 && digitalLoadQueue.Size() > 0)
+	{
+		int soundIndex = digitalLoadQueue[0];
+		digitalLoadQueue.Delete(0);
+		if(soundIndex <= 0 || (unsigned int)soundIndex >= sounds.Size())
+			continue;
+
+		SoundData &data = sounds[soundIndex];
+		if(data.lump[SoundData::DIGITAL] == -1 || data.digitalData)
+			continue;
+
+		data.digitalData.Reset(SD_PrepareSound(data.lump[SoundData::DIGITAL]));
+		if(data.digitalData)
+			loaded = SoundIndex(soundIndex);
+	}
+	return loaded;
+#else
+	(void)maxLoads;
+	return SoundIndex();
+#endif
 }
 
 SoundIndex SoundInformation::FindSound(const char* logical) const
@@ -365,7 +418,11 @@ void SoundInformation::ParseSoundInformation(int lumpNum)
 				idx.lump[i] = sndLump;
 				if(i == 0)
 				{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+					// Keep startup heap usage low; decode digital samples on first playback.
+#else
 					idx.digitalData.Reset(SD_PrepareSound(sndLump));
+#endif
 				}
 				else
 				{

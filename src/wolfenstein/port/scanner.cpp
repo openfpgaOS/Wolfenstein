@@ -104,10 +104,13 @@ static const char* const TokenNames[TK_NumSpecialTokens] =
 Scanner::Scanner(int lumpNum)
 : line(1), lineStart(0), logicalPosition(0), scanPos(0), needNext(true)
 {
-	FMemLump lump = Wads.ReadLump(lumpNum);
-	length = lump.GetSize();
+	long lumpLength = Wads.LumpLength(lumpNum);
+	if(lumpLength < 0)
+		lumpLength = 0;
+	length = (size_t)lumpLength+1;
 	this->data = new char[length];
-	memcpy(this->data, lump.GetMem(), length);
+	Wads.ReadLump(lumpNum, this->data);
+	this->data[lumpLength] = 0;
 
 	SetScriptIdentifier(Wads.GetLumpFullPath(lumpNum));
 

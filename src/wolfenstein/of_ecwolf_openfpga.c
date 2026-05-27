@@ -2,6 +2,7 @@
 
 #include "of_file.h"
 #include "of_mount.h"
+#include "of_services.h"
 #include "of_smp_bank.h"
 
 #include <stdio.h>
@@ -42,30 +43,32 @@ static void of_ecwolf_select_data_extension(void)
 
 static void of_ecwolf_log_bank_status(void)
 {
-    int rc = of_smp_bank_bind_preloaded();
-    if (rc > 0)
+    if (!OF_SVC || OF_SVC->magic != OF_SVC_MAGIC)
     {
-        const ofsf_header_t *hdr = of_smp_bank_get();
-        if (hdr)
-        {
-            printf("OFSF: loaded bank %.32s (%lu zones, %lu sample bytes).\n",
-                   hdr->bank_name,
-                   (unsigned long)hdr->zone_count,
-                   (unsigned long)hdr->sample_data_size);
-        }
-        else
-        {
-            printf("OFSF: loaded bank.\n");
-        }
+        printf("OFSF: service table unavailable.\n");
+        return;
     }
-    else if (rc == 0)
+
+    const ofsf_header_t *hdr = (const ofsf_header_t *)OF_SVC->smp_bank_preload_base;
+    uint32_t size = OF_SVC->smp_bank_preload_size;
+    if (!hdr || size < sizeof(*hdr))
     {
         printf("OFSF: bank.ofsf was not preloaded.\n");
+        return;
     }
-    else
+
+    if (hdr->magic != OFSF_MAGIC || hdr->version != OFSF_VERSION ||
+        hdr->sample_data_offset > size ||
+        hdr->sample_data_size > size - hdr->sample_data_offset)
     {
-        printf("OFSF: bank.ofsf preload failed (%d).\n", rc);
+        printf("OFSF: bank.ofsf preload header is invalid.\n");
+        return;
     }
+
+    printf("OFSF: preloaded bank %.32s (%lu zones, %lu sample bytes).\n",
+           hdr->bank_name,
+           (unsigned long)hdr->zone_count,
+           (unsigned long)hdr->sample_data_size);
 }
 
 __attribute__((constructor(200)))
@@ -78,7 +81,7 @@ static void of_ecwolf_openfpga_init(void)
     of_ecwolf_setenv_default("XDG_DATA_HOME", "/");
     of_ecwolf_select_data_extension();
 
-    of_file_slot_register(4, "bank.ofsf");
+    of_file_slot_register(7, "bank.ofsf");
     of_ecwolf_log_bank_status();
     of_file_slot_register(20, "ecwolf.cfg");
     if (of_iso_mount("slot:14", "/cd") < 0)

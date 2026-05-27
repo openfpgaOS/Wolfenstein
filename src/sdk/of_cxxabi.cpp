@@ -23,16 +23,43 @@
  * For std::cout-style I/O, use printf from <stdio.h> instead.
  */
 
+#include <stdint.h>     /* uintptr_t */
+#include <stdio.h>      /* musl: printf */
 #include <stdlib.h>     /* musl: malloc, free, abort */
+#include <unistd.h>     /* musl: sbrk */
+
+#include "of_caps.h"
 
 extern "C" {
 
 /* ── operator new / delete ──────────────────────────────────────── */
 
+static void __cxa_print_heap_state(void) {
+    const struct of_capabilities *caps = of_get_caps();
+    void *heap_break = sbrk(0);
+
+    if (caps && caps->magic == OF_CAPS_MAGIC) {
+        uintptr_t heap_end = (uintptr_t)caps->heap_base + caps->heap_size;
+        printf("operator new: heap base=%08lx size=%lu end=%08lx brk=%08lx\n",
+               (unsigned long)caps->heap_base,
+               (unsigned long)caps->heap_size,
+               (unsigned long)heap_end,
+               (unsigned long)(uintptr_t)heap_break);
+    } else {
+        printf("operator new: heap caps unavailable (%08lx), brk=%08lx\n",
+               (unsigned long)(uintptr_t)caps,
+               (unsigned long)(uintptr_t)heap_break);
+    }
+}
+
 void *__cxa_allocate(unsigned int size) {
     void *p = malloc(size);
-    if (!p) abort();    /* match the C++ standard's "throw bad_alloc"
+    if (!p) {
+        printf("operator new: out of memory allocating %u bytes\n", size);
+        __cxa_print_heap_state();
+        abort();        /* match the C++ standard's "throw bad_alloc"
                          * behavior, but without exceptions enabled */
+    }
     return p;
 }
 

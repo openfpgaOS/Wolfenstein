@@ -26,9 +26,13 @@ ISO9660 directly, including MODE1/2352 BIN sectors from CUE/BIN dumps, and
 serves the discovered files through ECWolf's normal file API.
 Wolfenstein 3-D and Spear of Destiny use their own AdLib/OPL music data from
 the game media. The default instances also map the SDK `bank.ofsf` SoundFont in
-slot 4, matching the SDK MIDI demo/test preload path, so the OS MIDI/SoundFont
+slot 7, matching the SDK MIDI demo/test preload path, so the OS MIDI/SoundFont
 preload path is available when ECWolf or later
 ports need it.
+The core metadata keeps optional placeholder slots 3-6 before slot 7 because
+the current firmware datatable lookup expects low data-slot IDs to occupy
+matching datatable entries; removing those placeholders prevents `bank.ofsf`
+from being detected at boot.
 The OpenFPGA wrapper also derives ECWolf's data extension from the selected
 instance (`.wl6` for `Wolf3D.json`, `.sod` for `Spear.json`) so mixed CD images
 do not drop into ECWolf's text IWAD picker.

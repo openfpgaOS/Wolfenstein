@@ -419,7 +419,7 @@ MapSpot GameMap::GetSpotByTag(unsigned int tag, MapSpot spot) const
 		spot = *starttag;
 	}
 	else
-		spot = spot->nexttag;
+		spot = spot->GetNextTag();
 
 	return spot;
 }
@@ -546,15 +546,15 @@ void GameMap::ScanTiles()
 // Adds the spot to the tag list. The linked chain is stored in the tile itself.
 void GameMap::SetSpotTag(MapSpot spot, unsigned int tag)
 {
-	spot->tag = tag;
+	spot->SetTag(tag);
 
 	MapSpot *chainPtr = tagMap.CheckKey(tag);
 	if(chainPtr)
 	{
 		MapSpot chain = *chainPtr;
-		while(chain->nexttag)
-			chain = chain->nexttag;
-		chain->nexttag = spot;
+		while(chain->GetNextTag())
+			chain = chain->GetNextTag();
+		chain->SetNextTag(spot);
 	}
 	else
 		tagMap.Insert(tag, spot);
@@ -728,19 +728,121 @@ MapSpot GameMap::Plane::Map::GetAdjacent(MapTile::Side dir, bool opposite) const
 void GameMap::Plane::Map::SetTile(const MapTile *tile)
 {
 	this->tile = tile;
+	ClearTextureOverride();
 	for(unsigned int i = 0;i < 4;++i)
 	{
 		if(tile)
-		{
-			sideSolid[i] = tile->sideSolid[i];
-			texture[i] = tile->texture[i];
-		}
+			SetSideSolid(i, tile->sideSolid[i]);
 		else
+			SetSideSolid(i, false);
+	}
+}
+
+const FTextureID &GameMap::Plane::Map::GetTexture(unsigned int side) const
+{
+	side &= 3;
+	if(textureOverride)
+		return textureOverride[side];
+	if(tile)
+		return tile->texture[side];
+
+	static FTextureID invalidTexture;
+	static bool invalidTextureInit = false;
+	if(!invalidTextureInit)
+	{
+		invalidTexture.SetInvalid();
+		invalidTextureInit = true;
+	}
+	return invalidTexture;
+}
+
+FTextureID &GameMap::Plane::Map::MutableTexture(unsigned int side)
+{
+	side &= 3;
+	if(!textureOverride)
+	{
+		textureOverride = new FTextureID[4];
+		for(unsigned int i = 0;i < 4;++i)
 		{
-			sideSolid[i] = false;
-			texture[i].SetInvalid();
+			if(tile)
+				textureOverride[i] = tile->texture[i];
+			else
+				textureOverride[i].SetInvalid();
 		}
 	}
+	return textureOverride[side];
+}
+
+void GameMap::Plane::Map::SetTexture(unsigned int side, FTextureID texture)
+{
+	MutableTexture(side) = texture;
+}
+
+void GameMap::Plane::Map::ClearTextureOverride()
+{
+	delete[] textureOverride;
+	textureOverride = NULL;
+}
+
+unsigned int GameMap::Plane::Map::GetTag() const
+{
+	return tagLink ? tagLink->tag : 0;
+}
+
+MapSpot GameMap::Plane::Map::GetNextTag() const
+{
+	return tagLink ? tagLink->next : NULL;
+}
+
+void GameMap::Plane::Map::SetTag(unsigned int tag)
+{
+	if(!tagLink)
+	{
+		tagLink = new TagLink;
+		tagLink->next = NULL;
+	}
+	tagLink->tag = tag;
+}
+
+void GameMap::Plane::Map::SetNextTag(Map *next)
+{
+	if(!tagLink)
+	{
+		tagLink = new TagLink;
+		tagLink->tag = 0;
+	}
+	tagLink->next = next;
+}
+
+bool GameMap::Plane::Map::IsSideSolid(unsigned int side) const
+{
+	switch(side & 3)
+	{
+		default:
+		case Tile::East: return sideSolidEast != 0;
+		case Tile::North: return sideSolidNorth != 0;
+		case Tile::West: return sideSolidWest != 0;
+		case Tile::South: return sideSolidSouth != 0;
+	}
+}
+
+void GameMap::Plane::Map::SetSideSolid(unsigned int side, bool solid)
+{
+	unsigned int value = solid ? 1u : 0u;
+	switch(side & 3)
+	{
+		default:
+		case Tile::East: sideSolidEast = value; break;
+		case Tile::North: sideSolidNorth = value; break;
+		case Tile::West: sideSolidWest = value; break;
+		case Tile::South: sideSolidSouth = value; break;
+	}
+}
+
+void GameMap::Plane::Map::SetAllSidesSolid(bool solid)
+{
+	unsigned int value = solid ? 1u : 0u;
+	sideSolidEast = sideSolidNorth = sideSolidWest = sideSolidSouth = value;
 }
 
 FArchive &operator<< (FArchive &arc, GameMap *&gm)
@@ -817,24 +919,94 @@ FArchive &operator<< (FArchive &arc, GameMap *&gm)
 		{
 			BYTE pushdir = plane.map[i].pushDirection;
 			arc << pushdir;
-			plane.map[i].pushDirection = static_cast<MapTile::Side>(pushdir);
+			plane.map[i].pushDirection = pushdir;
 
-			arc << plane.map[i].texture[0] << plane.map[i].texture[1] << plane.map[i].texture[2] << plane.map[i].texture[3]
-				<< plane.map[i].visible;
+			bool visible = plane.map[i].visible != 0;
+			FTextureID texture[4] = {
+				plane.map[i].GetTexture(0),
+				plane.map[i].GetTexture(1),
+				plane.map[i].GetTexture(2),
+				plane.map[i].GetTexture(3)
+			};
+			arc << texture[0] << texture[1] << texture[2] << texture[3]
+				<< visible;
+			if(!arc.IsStoring())
+			{
+				plane.map[i].ClearTextureOverride();
+				for(unsigned int side = 0;side < 4;++side)
+				{
+					if(texture[side] != plane.map[i].GetTexture(side))
+						plane.map[i].SetTexture(side, texture[side]);
+				}
+				plane.map[i].visible = visible ? 1u : 0u;
+			}
 			if(GameSave::SaveVersion >= 1393719642)
-				arc << plane.map[i].amFlags;
+			{
+				DWORD amFlags = plane.map[i].amFlags;
+				arc << amFlags;
+				if(!arc.IsStoring())
+					plane.map[i].amFlags = static_cast<BYTE>(amFlags);
+			}
+
+			DWORD slideAmount[4] = {
+				plane.map[i].slideAmount[0],
+				plane.map[i].slideAmount[1],
+				plane.map[i].slideAmount[2],
+				plane.map[i].slideAmount[3]
+			};
+			bool sideSolid[4] = {
+				plane.map[i].IsSideSolid(0),
+				plane.map[i].IsSideSolid(1),
+				plane.map[i].IsSideSolid(2),
+				plane.map[i].IsSideSolid(3)
+			};
 			arc << plane.map[i].thinker
-				<< plane.map[i].slideAmount[0] << plane.map[i].slideAmount[1] << plane.map[i].slideAmount[2] << plane.map[i].slideAmount[3]
-				<< plane.map[i].sideSolid[0] << plane.map[i].sideSolid[1] << plane.map[i].sideSolid[2] << plane.map[i].sideSolid[3]
-				<< plane.map[i].triggers
-				<< plane.map[i].pushAmount
+				<< slideAmount[0] << slideAmount[1] << slideAmount[2] << slideAmount[3]
+				<< sideSolid[0] << sideSolid[1] << sideSolid[2] << sideSolid[3];
+			if(!arc.IsStoring())
+			{
+				plane.map[i].slideAmount[0] = static_cast<WORD>(MIN(slideAmount[0], 0xffffu));
+				plane.map[i].slideAmount[1] = static_cast<WORD>(MIN(slideAmount[1], 0xffffu));
+				plane.map[i].slideAmount[2] = static_cast<WORD>(MIN(slideAmount[2], 0xffffu));
+				plane.map[i].slideAmount[3] = static_cast<WORD>(MIN(slideAmount[3], 0xffffu));
+				plane.map[i].SetSideSolid(0, sideSolid[0]);
+				plane.map[i].SetSideSolid(1, sideSolid[1]);
+				plane.map[i].SetSideSolid(2, sideSolid[2]);
+				plane.map[i].SetSideSolid(3, sideSolid[3]);
+			}
+
+			if(arc.IsStoring())
+			{
+				if(plane.map[i].triggers.HasArray())
+					arc << plane.map[i].triggers.Array();
+				else
+				{
+					TArray<MapTrigger> emptyTriggers;
+					arc << emptyTriggers;
+				}
+			}
+			else
+			{
+				arc << plane.map[i].triggers.MutableArray();
+				plane.map[i].triggers.Compact();
+			}
+
+			DWORD pushAmount = plane.map[i].pushAmount;
+			arc << pushAmount
 				<< plane.map[i].tile
 				<< plane.map[i].sector
 				<< plane.map[i].zone
 				<< plane.map[i].pushReceptor;
+			if(!arc.IsStoring())
+				plane.map[i].pushAmount = static_cast<BYTE>(MIN(pushAmount, 0xffu));
 
 			if(GameSave::SaveProdVersion >= 0x001002FF && GameSave::SaveVersion >= 1375246092)
-				arc << plane.map[i].slideStyle;
+			{
+				DWORD slideStyle = plane.map[i].slideStyle;
+				arc << slideStyle;
+				if(!arc.IsStoring())
+					plane.map[i].slideStyle = static_cast<BYTE>(slideStyle);
+			}
 
 			if(!arc.IsStoring())
 				plane.map[i].plane = &plane;

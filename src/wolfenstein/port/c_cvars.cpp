@@ -352,6 +352,14 @@ void ReadConfig(void)
 		screenWidth = windowedScreenWidth;
 	}
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// Keep the renderer on the native openfpgaOS 8-bit framebuffer. Larger
+	// saved desktop modes force the SDL shim into a slow software scaling path.
+	vid_fullscreen = false;
+	fullScreenWidth = windowedScreenWidth = screenWidth = 320;
+	fullScreenHeight = windowedScreenHeight = screenHeight = 240;
+#endif
+
 	// Propogate localDesiredFOV to players
 	for(unsigned int i = 0;i < MAXPLAYERS;++i)
 		players[i].SetFOV(localDesiredFOV);

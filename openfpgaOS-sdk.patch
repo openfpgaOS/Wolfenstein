@@ -1,0 +1,235 @@
+diff --git a/src/firmware/api/of_cxxabi.cpp b/src/firmware/api/of_cxxabi.cpp
+index 9ab5708..6668c6f 100644
+--- a/src/firmware/api/of_cxxabi.cpp
++++ b/src/firmware/api/of_cxxabi.cpp
+@@ -23,16 +23,43 @@
+  * For std::cout-style I/O, use printf from <stdio.h> instead.
+  */
+ 
++#include <stdint.h>     /* uintptr_t */
++#include <stdio.h>      /* musl: printf */
+ #include <stdlib.h>     /* musl: malloc, free, abort */
++#include <unistd.h>     /* musl: sbrk */
++
++#include "of_caps.h"
+ 
+ extern "C" {
+ 
+ /* ── operator new / delete ──────────────────────────────────────── */
+ 
++static void __cxa_print_heap_state(void) {
++    const struct of_capabilities *caps = of_get_caps();
++    void *heap_break = sbrk(0);
++
++    if (caps && caps->magic == OF_CAPS_MAGIC) {
++        uintptr_t heap_end = (uintptr_t)caps->heap_base + caps->heap_size;
++        printf("operator new: heap base=%08lx size=%lu end=%08lx brk=%08lx\n",
++               (unsigned long)caps->heap_base,
++               (unsigned long)caps->heap_size,
++               (unsigned long)heap_end,
++               (unsigned long)(uintptr_t)heap_break);
++    } else {
++        printf("operator new: heap caps unavailable (%08lx), brk=%08lx\n",
++               (unsigned long)(uintptr_t)caps,
++               (unsigned long)(uintptr_t)heap_break);
++    }
++}
++
+ void *__cxa_allocate(unsigned int size) {
+     void *p = malloc(size);
+-    if (!p) abort();    /* match the C++ standard's "throw bad_alloc"
++    if (!p) {
++        printf("operator new: out of memory allocating %u bytes\n", size);
++        __cxa_print_heap_state();
++        abort();        /* match the C++ standard's "throw bad_alloc"
+                          * behavior, but without exceptions enabled */
++    }
+     return p;
+ }
+ 
+diff --git a/src/firmware/os/hal/regs.h b/src/firmware/os/hal/regs.h
+index 6c3dca8..ee6cf4a 100644
+--- a/src/firmware/os/hal/regs.h
++++ b/src/firmware/os/hal/regs.h
+@@ -76,7 +76,7 @@
+ /* Runtime stack layout (must match os.ld) */
+ #define RUNTIME_STACK_TOP   OF_TARGET_RUNTIME_STACK_TOP
+ #define RUNTIME_STACK_SIZE  OF_TARGET_RUNTIME_STACK_SIZE
+-#define APP_STACK_TOP       (RUNTIME_STACK_TOP - RUNTIME_STACK_SIZE)  /* 0x13F80000 */
++#define APP_STACK_TOP       (RUNTIME_STACK_TOP - RUNTIME_STACK_SIZE)
+ 
+ /* Sample memory pool for the shared mixer allocator.  SAMPLE_POOL_BASE
+  * is the cached alias used by SFX uploads (paired with cbo.flush).
+diff --git a/src/firmware/os/kernel/caps_table.c b/src/firmware/os/kernel/caps_table.c
+index 1d47f4a..6c3ac04 100644
+--- a/src/firmware/os/kernel/caps_table.c
++++ b/src/firmware/os/kernel/caps_table.c
+@@ -35,8 +35,7 @@ void caps_table_init(uintptr_t heap_base) {
+ 
+     /* Memory regions */
+     caps->heap_base   = (uint32_t)heap_base;
+-    caps->heap_size   = (platform->sdram_base + platform->sdram_size)
+-                      - (uint32_t)heap_base - platform->runtime_stack_size;
++    caps->heap_size   = (APP_STACK_TOP - platform->runtime_stack_size) - (uint32_t)heap_base;
+     caps->fb_base     = platform->fb_bases[0];
+     caps->fb_size     = FB_SIZE;
+     caps->fb_width    = platform->fb_width;
+diff --git a/src/firmware/os/kernel/syscall.c b/src/firmware/os/kernel/syscall.c
+index 3e7346d..540b866 100644
+--- a/src/firmware/os/kernel/syscall.c
++++ b/src/firmware/os/kernel/syscall.c
+@@ -2516,19 +2516,14 @@ void syscall_init(uintptr_t heap_start) {
+     fd_table[FD_STDERR].in_use = 1;
+     brk_base    = heap_start;
+     current_brk = heap_start;
+-    /* mmap grows down from APP_STACK_TOP - APP_STACK_SIZE.  The window
+-     * nominally ends at APP_VMAP_V1_SDRAM_END (0x13400000) for
+-     * portability, but on-target SDRAM extends further, and we let
+-     * mmap reclaim that tail so memory-hungry workloads don't run
+-     * out in the 48 MB portable window.  APP_VMAP_V1_SDRAM_END still
+-     * bounds PT_LOAD segments — just not mmap.
++    /* mmap grows down from the guard below APP_STACK_TOP. APP_VMAP_V1_SDRAM_END
++     * still bounds PT_LOAD segments, but runtime mmap/brk can use the larger
++     * target-specific SDRAM window below the app stack guard.
+      *
+      * Strict inequality vs APP_STACK_TOP is critical: sys_mmap2
+      * zero-fills every carved region, and if mmap_bottom == stack
+-     * top the first mmap wipes whatever stack frames the app
+-     * already pushed.  Reserve the same 512 KB stack span used
+-     * above 0x13F80000 for the OS runtime stack. */
+-    mmap_bottom = 0x12F00000u;   /* APP_STACK_TOP (0x12F80000) - 512 KB */
++     * top the first mmap wipes whatever stack frames the app already pushed. */
++    mmap_bottom = APP_STACK_TOP - RUNTIME_STACK_SIZE;
+ 
+     /* Reset mmap region tracker — the previous app's allocations
+      * are no longer reachable once current_brk/mmap_bottom are
+diff --git a/src/firmware/os/os.ld b/src/firmware/os/os.ld
+index af235b6..12c0e3a 100644
+--- a/src/firmware/os/os.ld
++++ b/src/firmware/os/os.ld
+@@ -131,16 +131,16 @@ SECTIONS
+ 
+     /* Memory regions.
+      *
+-     * __runtime_stack_top is 16 MB below the SDRAM PMA end (0x14000000) —
+-     * a conservative known-good SDRAM region.  With the stack top at the
++     * __runtime_stack_top leaves several MB below the SDRAM PMA end
++     * (0x14000000) and the sample pool, while giving apps more brk/mmap
++     * room below their stack.  With the stack top at the
+      * PMA edge, speculative loads past the top (branch prediction paths,
+      * cache line ahead-fill) cross into unmapped memory and surface as
+      * architectural load
+-     * access faults.  16 MB of headroom is more than any speculation
+-     * window reaches. */
++     * access faults. */
+     __os_heap_start = __os_bss_end;
+     __save_region = 0x13C00000;
+-    __runtime_stack_top = 0x13000000;
++    __runtime_stack_top = 0x13680000;
+     __runtime_stack_size = 512K;
+     __runtime_stack_bottom = __runtime_stack_top - __runtime_stack_size;
+ 
+diff --git a/src/firmware/os/targets/pocket/target_platform.h b/src/firmware/os/targets/pocket/target_platform.h
+index d87d69a..1799f71 100644
+--- a/src/firmware/os/targets/pocket/target_platform.h
++++ b/src/firmware/os/targets/pocket/target_platform.h
+@@ -73,23 +73,21 @@
+ #define OF_TARGET_CRAM0_APP_DMA_SIZE   0x00100000u   /* 1 MB */
+ 
+ /* SRAM is GPU-private in v2 — no AXI alias, not CPU-addressable. */
+ /* (OF_TARGET_SRAM_BASE / OF_TARGET_SRAM_SIZE removed) */
+ 
+-/* Placed 16 MB below the SDRAM PMA end (0x14000000) as a conservative
+- * known-good SDRAM region.  VexiiRiscv's aggressive speculation
+- * (branch prediction, rpt prefetch when on, cache line ahead-fill)
+- * can issue loads several lines past the last committed one; with
+- * the stack top at the PMA edge those speculated addresses cross
+- * into unmapped memory and
+- * surface as architectural load access faults.  16 MB of headroom
+- * is more than any speculation window reaches and costs us nothing —
+- * the sample pool, mmap, and app load still fit. */
+-#define OF_TARGET_RUNTIME_STACK_TOP    0x13000000u
++/* Placed below the SDRAM sample pool instead of at the PMA edge
++ * (0x14000000).  VexiiRiscv's aggressive speculation (branch prediction,
++ * rpt prefetch when on, cache line ahead-fill) can issue loads several
++ * lines past the last committed one; keeping the runtime stack away from
++ * the PMA edge avoids crossing into unmapped memory.  This still leaves
++ * a 512 KB guard before the sample pool while reclaiming the otherwise
++ * unused SDRAM gap for app brk/mmap allocations. */
++#define OF_TARGET_RUNTIME_STACK_TOP    0x13680000u
+ #define OF_TARGET_RUNTIME_STACK_SIZE   (512u * 1024u)
+ 
+-/* Sample pool: 8 MB in SDRAM carved out of the top of the app's
+- * heap/mmap window so app load base (0x10400000) stays unchanged —
+- * existing app ELFs remain compatible.  The OS shifts mmap_bottom
+- * down by 8 MB so mmap never allocates into the sample region.
++/* Sample pool: 8 MB in SDRAM above the runtime stack area so app load
++ * base (0x10400000) stays unchanged — existing app ELFs remain compatible.
++ * The OS keeps mmap/brk below the app stack guard so allocations never
++ * enter this sample region.
+  * Size is 2 MB of headroom over the SC-55 bank (~6 MB).
+  *
+ * SAMPLE_BASE is the cached alias — used for SFX uploads that pair
+diff --git a/src/firmware/api/of_smp_bank.c b/src/firmware/api/of_smp_bank.c
+index 3c0c275..f3cda12 100644
+--- a/src/firmware/api/of_smp_bank.c
++++ b/src/firmware/api/of_smp_bank.c
+@@ -2,11 +2,11 @@
+  * of_smp_bank.c -- .ofsf runtime bank reader
+  *
+  * The kernel auto-loads the first .ofsf it finds in a data slot at boot
+- * and hands the buffer to apps via OF_SVC->smp_bank_preload_base. This
+- * file copies the metadata (header + presets + zones) into SDRAM so the
+- * CPU never reads CRAM1 during playback — only the mixer DMA touches
+- * CRAM1.  Without this copy, CPU zone-reads and mixer sample-DMA
+- * contend on the CRAM1 bus arbiter and eventually deadlock.
++ * and hands the buffer to apps via OF_SVC->smp_bank_preload_base. Binding
++ * copies metadata (header + presets + zones) into SDRAM so the CPU never
++ * reads sample-pool memory during playback. Keep that copy lazy: ECWolf-class
++ * apps may stage a bank for optional MIDI support while normal game startup
++ * never uses the sample synth, and the metadata can be several megabytes.
+  */
+ 
+ #include "include/of_smp_bank.h"
+@@ -74,12 +74,6 @@ int of_smp_bank_bind_preloaded(void)
+     return 1;
+ }
+ 
+-__attribute__((constructor(102)))
+-static void bank_autobind(void)
+-{
+-    (void)of_smp_bank_bind_preloaded();
+-}
+-
+ const ofsf_header_t *of_smp_bank_get(void)
+ {
+     return loaded_header;
+diff --git a/src/firmware/api/of_smp_bank.h b/src/firmware/api/of_smp_bank.h
+index d56b7e7..b00bb0d 100644
+--- a/src/firmware/api/of_smp_bank.h
++++ b/src/firmware/api/of_smp_bank.h
+@@ -147,18 +147,18 @@ typedef struct {
+ /* ---- Runtime API ----
+  *
+  * No load/unload: the kernel auto-loads a .ofsf file staged in any data
+- * slot at boot, and an SDK constructor binds this module to it before
+- * main() runs. Apps just use the query functions below. */
++ * slot at boot. Apps bind the metadata lazily by calling
++ * of_smp_bank_bind_preloaded(), or indirectly through of_midi_init(). */
+ 
+ const ofsf_header_t *of_smp_bank_get(void);
+ const void          *of_smp_bank_sample_base(void);
+ 
+ /* Bind this module to the kernel-preloaded .ofsf bank.
+  *
+- * Apps normally do not need to call this directly: an SDK constructor runs it
+- * before main(), and of_midi_init() retries it.  The explicit entry exists so
+- * apps/tests can force a retry and distinguish "no bank" from "metadata bind
+- * failed" without starting MIDI playback.
++ * Apps normally do not need to call this directly unless they use the raw
++ * sample-bank APIs; of_midi_init() calls it before playback.  The explicit
++ * entry exists so apps/tests can force a bind and distinguish "no bank" from
++ * "metadata bind failed" without starting MIDI playback.
+  *
+  * Returns 1 when a bank is bound, 0 when no preloaded bank is available, and
+  * a negative value for malformed preload data or metadata allocation failure.

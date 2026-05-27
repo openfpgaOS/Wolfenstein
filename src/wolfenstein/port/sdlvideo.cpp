@@ -392,6 +392,9 @@ CUSTOM_CVAR (Float, bgamma, 1.f, CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
 // Dummy screen sizes to pass when windowed
 static MiniModeInfo WinModes[] =
 {
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	{ 320, 240 },
+#else
 	{ 320, 200 },
 	{ 320, 240 },
 	{ 400, 225 },	// 16:9
@@ -466,6 +469,7 @@ static MiniModeInfo WinModes[] =
 	{ 4480, 2520 }, // 16:9
 	{ 5120, 1440 }, // 32:9
 	{ 5120, 2880 }
+#endif
 };
 
 //static cycle_t BlitCycles;

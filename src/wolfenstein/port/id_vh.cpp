@@ -3,6 +3,7 @@
 #include "am_map.h"
 #include "colormatcher.h"
 #include "id_in.h"
+#include "id_sd.h"
 #include "id_vl.h"
 #include "id_vh.h"
 #include "w_wad.h"
@@ -150,6 +151,7 @@ void Blit8BitSurfaceToTexture(SDL_Texture *tex, SDL_Surface *surf)
 void VH_UpdateScreen()
 {
 	screen->Update();
+	SD_PumpSoundLoads();
 	screen->Lock(false);
 }
 

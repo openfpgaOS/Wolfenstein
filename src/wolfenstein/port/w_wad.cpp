@@ -1013,7 +1013,7 @@ FMemLump FWadCollection::ReadLump (int lump)
 			size, lump, GetLumpFullName(lump));
 	}
 
-	FMemLump memlump ((size_t)size);
+	FMemLump memlump ((size_t)size, lump, GetLumpFullName(lump), GetWadName(GetLumpFile(lump)));
 	long numread = lumpr.Read (memlump.Block, size);
 	((char *)memlump.Block)[size] = '\0';
 
@@ -1362,12 +1362,17 @@ FMemLump &FMemLump::operator = (const FMemLump &copy)
 	return *this;
 }
 
-FMemLump::FMemLump (size_t size)
+FMemLump::FMemLump (size_t size, int lump, const char *name, const char *wadname)
 : Block(NULL), Size(size + 1)
 {
 	Block = malloc(Size);
 	if (Block == NULL)
 	{
+		if (lump >= 0)
+		{
+			printf("FMemLump: out of memory allocating %u bytes for lump %d (%s:%s)\n",
+				(unsigned)Size, lump, wadname ? wadname : "?", name ? name : "?");
+		}
 		I_Error("FMemLump: out of memory allocating %u bytes\n", (unsigned)Size);
 	}
 }

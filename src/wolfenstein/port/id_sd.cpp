@@ -97,6 +97,19 @@ static  bool					DigiPlaying;
 
 static int samplesPerMusicTick;
 
+struct PendingDigitalPlay
+{
+	SoundIndex sound;
+	int leftpos;
+	int rightpos;
+	SoundChannel channel;
+	uint32_t tick;
+	bool positioned;
+};
+
+static PendingDigitalPlay PendingDigitalPlays[8];
+static unsigned int PendingDigitalPlayNext;
+
 //      PC Sound variables
 static  volatile byte           pcLastSample;
 static  byte * volatile         pcSound;
@@ -117,6 +130,8 @@ static  word                   *sqHackPtr;
 static  int                     sqHackLen;
 static  int                     sqHackSeqLen;
 static  longword                sqHackTime;
+
+static int SD_PlayDigitized(const SoundData &which,int leftpos,int rightpos,SoundChannel chan);
 
 
 //	Noah3D MIDI playback variables and functions
@@ -611,6 +626,67 @@ static int MacSound_Close(SDL_RWops *ops)
 	free(((MacSoundData*)ops->hidden.unknown.data1)->data);
 	free(ops->hidden.unknown.data1);
 	return 0;
+}
+
+static void SD_QueuePendingDigitalPlay(SoundIndex sound, int leftpos, int rightpos, SoundChannel channel, bool positioned)
+{
+	uint32_t now = SDL_GetTicks();
+	for(unsigned int i = 0;i < countof(PendingDigitalPlays);++i)
+	{
+		if((int)PendingDigitalPlays[i].sound == (int)sound)
+		{
+			PendingDigitalPlays[i].leftpos = leftpos;
+			PendingDigitalPlays[i].rightpos = rightpos;
+			PendingDigitalPlays[i].channel = channel;
+			PendingDigitalPlays[i].tick = now;
+			PendingDigitalPlays[i].positioned = positioned;
+			return;
+		}
+	}
+
+	PendingDigitalPlay &pending = PendingDigitalPlays[PendingDigitalPlayNext++ % countof(PendingDigitalPlays)];
+	pending.sound = sound;
+	pending.leftpos = leftpos;
+	pending.rightpos = rightpos;
+	pending.channel = channel;
+	pending.tick = now;
+	pending.positioned = positioned;
+}
+
+static void SD_PlayPendingDigitalSound(SoundIndex sound)
+{
+	uint32_t now = SDL_GetTicks();
+	for(unsigned int i = 0;i < countof(PendingDigitalPlays);++i)
+	{
+		PendingDigitalPlay &pending = PendingDigitalPlays[i];
+		if((int)pending.sound != (int)sound)
+			continue;
+
+		if(now - pending.tick <= 500)
+		{
+			const SoundData &sdata = SoundInfo[sound];
+			int channel = SD_PlayDigitized(sdata, pending.leftpos, pending.rightpos, pending.channel);
+			if(channel > 0)
+			{
+				channelSoundPos[channel-1].source = NULL;
+				channelSoundPos[channel-1].valid = false;
+				channelSoundPos[channel-1].positioned = pending.positioned;
+				DigiPriority = sdata.GetPriority();
+				SoundPlaying = sound;
+			}
+		}
+		pending.sound = SoundIndex();
+	}
+}
+
+void SD_PumpSoundLoads(void)
+{
+	if(SD_Started)
+	{
+		SoundIndex loaded = SoundInfo.PumpDigitalLoads(1);
+		if(!loaded.IsNull())
+			SD_PlayPendingDigitalSound(loaded);
+	}
 }
 
 Mix_Chunk* SD_PrepareSound(int which)
@@ -1285,6 +1361,13 @@ int SD_PlaySound(const char* sound, SoundChannel chan)
 
 	if ((DigiMode != sds_Off) && sdata.HasType(SoundData::DIGITAL))
 	{
+		if(sdata.GetDigitalData() == NULL)
+		{
+			SoundInfo.QueueDigitalLoad(sindex);
+			SD_QueuePendingDigitalPlay(sindex, lp, rp, chan, ispos);
+			return 0;
+		}
+
 		if ((DigiMode == sds_PC) && (SoundMode == sdm_PC))
 		{
 #ifdef NOTYET
@@ -1308,9 +1391,12 @@ int SD_PlaySound(const char* sound, SoundChannel chan)
 #endif
 
 			int channel = SD_PlayDigitized(sdata, lp, rp, chan);
-			channelSoundPos[channel-1].positioned = ispos;
-			DigiPriority = sdata.GetPriority();
-			SoundPlaying = sindex;
+			if(channel > 0)
+			{
+				channelSoundPos[channel-1].positioned = ispos;
+				DigiPriority = sdata.GetPriority();
+				SoundPlaying = sindex;
+			}
 			return channel;
 		}
 

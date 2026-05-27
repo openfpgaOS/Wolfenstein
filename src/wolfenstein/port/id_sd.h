@@ -165,6 +165,7 @@ extern  bool	SD_SetMusicMode(SMMode mode);
 extern  bool    SD_SoundPlaying(void);
 
 extern  void    SD_SetDigiDevice(SDSMode);
+extern  void    SD_PumpSoundLoads(void);
 extern  struct Mix_Chunk *SD_PrepareSound(int which);
 extern  void    SD_StopDigitized(void);
 

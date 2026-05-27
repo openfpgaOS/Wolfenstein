@@ -272,6 +272,16 @@ struct BaseFile
 	FString	filename[BASEFILES];
 	BYTE	isValid;
 };
+
+static FString NormalizeExtensionName(const char *extension)
+{
+	if(extension == NULL)
+		return FString();
+	while(*extension == '.')
+		++extension;
+	return FString(extension);
+}
+
 /* Steam ships Spear of Destiny in the mission pack 3 state, so we need to go
  * and correct steam installs.
  *
@@ -281,7 +291,8 @@ static bool VerifySpearInstall(const char* directory)
 {
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	const char *forcedExtension = getenv("ECWOLF_DATA_EXT");
-	if(forcedExtension && strcmp(forcedExtension, "wl6") == 0)
+	FString normalizedExtension = NormalizeExtensionName(forcedExtension);
+	if(normalizedExtension.CompareNoCase("wl6") == 0)
 		return true;
 #endif
 
@@ -780,20 +791,30 @@ void SelectGame(TArray<FString> &wadfiles, const char* iwad, const char* datawad
 	}
 
 	int pick = -1;
-	if(iwad)
+	FString requestedIWad = NormalizeExtensionName(iwad);
+	if(requestedIWad.IsNotEmpty())
 	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		Printf("IWad: requested data extension .%s.\n", requestedIWad.GetChars());
+#endif
 		for(unsigned int i = 0;i < basefiles.Size();++i)
-		{
-			#if ISCASEINSENSITIVE
-			if(basefiles[i].Extension.CompareNoCase(iwad) == 0)
-			#else
-			if(basefiles[i].Extension.Compare(iwad) == 0)
-			#endif
+			{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+				if(basefiles[i].Extension.CompareNoCase(requestedIWad) == 0)
+#elif ISCASEINSENSITIVE
+				if(basefiles[i].Extension.CompareNoCase(requestedIWad) == 0)
+#else
+				if(basefiles[i].Extension.Compare(requestedIWad) == 0)
+#endif
 			{
 				pick = i;
 				break;
 			}
 		}
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		if(pick < 0)
+			Printf("IWad: requested data extension .%s was not found.\n", requestedIWad.GetChars());
+#endif
 	}
 	if(pick < 0)
 	{

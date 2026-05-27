@@ -12,7 +12,6 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/types.h>
-#include <unistd.h>
 
 namespace
 {
@@ -41,6 +40,7 @@ static bool cd_init_attempted;
 static bool cd_ready;
 static uint32_t cd_sector_size;
 static uint32_t cd_data_offset;
+static uint8_t cd_raw_cache[32768];
 
 static volatile int async_done;
 static volatile int async_result;
@@ -73,7 +73,6 @@ static int read_slot_raw(uint32_t offset, void *dest, uint32_t len)
             of_file_async_poll();
             if (!of_file_async_busy())
                 break;
-            usleep(1000);
         }
         if (!async_done || async_result < 0)
             return async_done ? async_result : -1;
@@ -89,22 +88,53 @@ static int read_iso_payload(uint32_t logical_offset, void *dest, uint32_t len)
 {
     uint8_t *out = static_cast<uint8_t *>(dest);
 
+    if (cd_sector_size == ISO_SECTOR_SIZE && cd_data_offset == 0)
+        return read_slot_raw(logical_offset, dest, len);
+
     while (len > 0)
     {
         uint32_t sector = logical_offset / ISO_SECTOR_SIZE;
         uint32_t in_sector = logical_offset % ISO_SECTOR_SIZE;
-        uint32_t chunk = ISO_SECTOR_SIZE - in_sector;
-        if (chunk > len)
-            chunk = len;
 
-        uint32_t raw_offset = sector * cd_sector_size + cd_data_offset + in_sector;
-        int rc = read_slot_raw(raw_offset, out, chunk);
-        if (rc < 0)
-            return rc;
+        if (in_sector == 0 && len >= ISO_SECTOR_SIZE)
+        {
+            uint32_t sectors = len / ISO_SECTOR_SIZE;
+            uint32_t max_sectors = sizeof(cd_raw_cache) / cd_sector_size;
+            if (sectors > max_sectors)
+                sectors = max_sectors;
+            if (sectors == 0)
+                sectors = 1;
 
-        logical_offset += chunk;
-        out += chunk;
-        len -= chunk;
+            int rc = read_slot_raw(sector * cd_sector_size, cd_raw_cache, sectors * cd_sector_size);
+            if (rc < 0)
+                return rc;
+
+            for (uint32_t i = 0; i < sectors; i++)
+                memcpy(out + i * ISO_SECTOR_SIZE,
+                       cd_raw_cache + i * cd_sector_size + cd_data_offset,
+                       ISO_SECTOR_SIZE);
+
+            uint32_t copied = sectors * ISO_SECTOR_SIZE;
+            logical_offset += copied;
+            out += copied;
+            len -= copied;
+        }
+        else
+        {
+            uint32_t chunk = ISO_SECTOR_SIZE - in_sector;
+            if (chunk > len)
+                chunk = len;
+
+            int rc = read_slot_raw(sector * cd_sector_size, cd_raw_cache, cd_sector_size);
+            if (rc < 0)
+                return rc;
+
+            memcpy(out, cd_raw_cache + cd_data_offset + in_sector, chunk);
+
+            logical_offset += chunk;
+            out += chunk;
+            len -= chunk;
+        }
     }
     return 0;
 }

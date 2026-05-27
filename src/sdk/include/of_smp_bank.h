@@ -147,18 +147,18 @@ _Static_assert(sizeof(ofsf_preset_t) ==   4, "ofsf_preset_t must be 4 bytes");
 /* ---- Runtime API ----
  *
  * No load/unload: the kernel auto-loads a .ofsf file staged in any data
- * slot at boot, and an SDK constructor binds this module to it before
- * main() runs. Apps just use the query functions below. */
+ * slot at boot. Apps bind the metadata lazily by calling
+ * of_smp_bank_bind_preloaded(), or indirectly through of_midi_init(). */
 
 const ofsf_header_t *of_smp_bank_get(void);
 const void          *of_smp_bank_sample_base(void);
 
 /* Bind this module to the kernel-preloaded .ofsf bank.
  *
- * Apps normally do not need to call this directly: an SDK constructor runs it
- * before main(), and of_midi_init() retries it.  The explicit entry exists so
- * apps/tests can force a retry and distinguish "no bank" from "metadata bind
- * failed" without starting MIDI playback.
+ * Apps normally do not need to call this directly unless they use the raw
+ * sample-bank APIs; of_midi_init() calls it before playback.  The explicit
+ * entry exists so apps/tests can force a bind and distinguish "no bank" from
+ * "metadata bind failed" without starting MIDI playback.
  *
  * Returns 1 when a bank is bound, 0 when no preloaded bank is available, and
  * a negative value for malformed preload data or metadata allocation failure.

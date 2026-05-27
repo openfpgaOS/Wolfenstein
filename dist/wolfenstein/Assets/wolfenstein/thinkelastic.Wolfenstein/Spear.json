@@ -5,7 +5,7 @@
         "data_slots": [
             { "id": 1, "filename": "os.bin" },
             { "id": 2, "filename": "wolfenstein.elf" },
-            { "id": 4, "filename": "bank.ofsf" },
+            { "id": 7, "filename": "bank.ofsf" },
             { "id": 14, "filename": "Spear of Destiny (USA).cue" },
             { "id": 15, "filename": "Spear of Destiny (USA).bin" },
             { "id": 20, "filename": "ecwolf.cfg" },

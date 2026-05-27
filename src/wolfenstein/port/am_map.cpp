@@ -376,9 +376,9 @@ void AutoMap::Draw()
 						if(spot->tile->overhead.isValid())
 							tex = TexMan(spot->tile->overhead);
 						else if(spot->tile->offsetHorizontal)
-							tex = TexMan(spot->texture[MapTile::North]);
+							tex = TexMan(spot->GetTexture(MapTile::North));
 						else
-							tex = TexMan(spot->texture[MapTile::East]);
+							tex = TexMan(spot->GetTexture(MapTile::East));
 					}
 					else
 					{
@@ -446,7 +446,7 @@ void AutoMap::Draw()
 				{
 					AMPWall pwall;
 					pwall.points = points;
-					pwall.texid = spot->tile->overhead.isValid() ? spot->tile->overhead : spot->texture[0];
+					pwall.texid = spot->tile->overhead.isValid() ? spot->tile->overhead : spot->GetTexture(0);
 					pwall.shiftx = (float)(FIXED2FLOAT(FixedMul(FixedMul(scale, tx&0xFFFF), amcos) - FixedMul(FixedMul(scale, ty&0xFFFF), amsin)));
 					pwall.shifty = (float)(FIXED2FLOAT(FixedMul(FixedMul(scale, tx&0xFFFF), amsin) + FixedMul(FixedMul(scale, ty&0xFFFF), amcos)));
 					pwalls.Push(pwall);

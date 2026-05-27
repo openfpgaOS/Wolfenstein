@@ -247,7 +247,7 @@ bool P_ChangeSwitchTexture (MapSpot spot, MapTile::Side side, int useAgain, BYTE
 		return false;
 	}
 #else
-	Switch = TexMan.FindSwitch(spot->texture[side]);
+	Switch = TexMan.FindSwitch(spot->GetTexture(side));
 	if(!Switch)
 		return false;
 #endif
@@ -276,7 +276,7 @@ bool P_ChangeSwitchTexture (MapSpot spot, MapTile::Side side, int useAgain, BYTE
 
 	pt[0] = spot->GetX();
 	pt[1] = spot->GetY();
-	spot->texture[side] = Switch->frames[0].Texture;
+	spot->SetTexture(side, Switch->frames[0].Texture);
 	if (useAgain || Switch->NumFrames > 1)
 	{
 		playsound = P_StartButton (spot, side, Switch, pt[0], pt[1], !!useAgain);
@@ -390,7 +390,7 @@ void DActiveButton::Tick ()
 		}
 		bool killme = AdvanceFrame ();
 
-		m_Spot->texture[m_Side] = def->frames[m_Frame].Texture;
+		m_Spot->SetTexture(m_Side, def->frames[m_Frame].Texture);
 
 		if (killme)
 		{

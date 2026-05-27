@@ -151,48 +151,127 @@ class GameMap
 			unsigned short	index;
 		};
 		struct Plane
-		{
-			const GameMap	*gm;
-
-			unsigned int	depth;
-			struct Map
 			{
-				Map() : tile(NULL), sector(NULL), zone(NULL), visible(false),
-					amFlags(0), thinker(NULL), slideStyle(0),
-					pushDirection(Tile::East), pushAmount(0),
-					pushReceptor(NULL), tag(0), nexttag(NULL)
+				const GameMap	*gm;
+
+				unsigned int	depth;
+				struct Map;
+				class TriggerList
+				{
+				TArray<Trigger> *items;
+
+			public:
+				TriggerList() : items(NULL) {}
+				~TriggerList() { delete items; }
+
+				unsigned int Size() const
+				{
+					return items ? items->Size() : 0;
+				}
+
+				Trigger &operator[] (unsigned int index)
+				{
+					return (*items)[index];
+				}
+
+				const Trigger &operator[] (unsigned int index) const
+				{
+					return (*items)[index];
+				}
+
+				unsigned int Push(const Trigger &trigger)
+				{
+					return MutableArray().Push(trigger);
+				}
+
+				bool HasArray() const
+				{
+					return items != NULL;
+				}
+
+				TArray<Trigger> &Array()
+				{
+					return *items;
+				}
+
+				TArray<Trigger> &MutableArray()
+				{
+					if(!items)
+						items = new TArray<Trigger>();
+					return *items;
+				}
+
+				void Compact()
+				{
+					if(items && items->Size() == 0)
+					{
+						delete items;
+						items = NULL;
+					}
+				}
+
+			private:
+				TriggerList(const TriggerList &);
+				TriggerList &operator= (const TriggerList &);
+				};
+				struct TagLink
+				{
+					unsigned int tag;
+					Map *next;
+				};
+				struct Map
+				{
+					Map() : plane(NULL), tile(NULL), sector(NULL), zone(NULL),
+					thinker(NULL), pushReceptor(NULL), tagLink(NULL), textureOverride(NULL),
+					amFlags(0), slideStyle(0), pushDirection(Tile::East),
+					pushAmount(0), visible(false), sideSolidEast(true),
+					sideSolidNorth(true), sideSolidWest(true), sideSolidSouth(true)
 				{
 					slideAmount[0] = slideAmount[1] = slideAmount[2] = slideAmount[3] = 0;
-					sideSolid[0] = sideSolid[1] = sideSolid[2] = sideSolid[3] = true;
+				}
+				~Map()
+				{
+					delete tagLink;
+					delete[] textureOverride;
 				}
 
 				unsigned int	GetX() const;
 				unsigned int	GetY() const;
 				Map				*GetAdjacent(Tile::Side dir, bool opposite=false) const;
 				void			SetTile(const Tile *tile);
+				const FTextureID &GetTexture(unsigned int side) const;
+				FTextureID		&MutableTexture(unsigned int side);
+				void			SetTexture(unsigned int side, FTextureID texture);
+				void			ClearTextureOverride();
+				unsigned int	GetTag() const;
+				Map				*GetNextTag() const;
+				void			SetTag(unsigned int tag);
+				void			SetNextTag(Map *next);
+				bool			IsSideSolid(unsigned int side) const;
+				void			SetSideSolid(unsigned int side, bool solid);
+				void			SetAllSidesSolid(bool solid);
 
 				const Plane		*plane;
 
 				const Tile		*tile;
 				const Sector	*sector;
 				const Zone		*zone;
-
-				// So that the textures can change.
-				FTextureID		texture[4];
-
-				bool			visible;
-				unsigned int	amFlags;
 				TObjPtr<Thinker> thinker;
-				unsigned int	slideAmount[4];
-				unsigned int	slideStyle;
-				bool			sideSolid[4];
-				TArray<Trigger>	triggers;
-				Tile::Side		pushDirection;
-				unsigned int	pushAmount;
 				Map				*pushReceptor;
+				TagLink			*tagLink;
+				FTextureID		*textureOverride;
 
-				unsigned int	tag;
-				Plane::Map		*nexttag;
+				WORD			slideAmount[4];
+				TriggerList	triggers;
+				unsigned int	amFlags:2;
+				unsigned int	slideStyle:2;
+				unsigned int	pushDirection:2;
+				unsigned int	pushAmount:7;
+				unsigned int	visible:1;
+				unsigned int	sideSolidEast:1;
+				unsigned int	sideSolidNorth:1;
+				unsigned int	sideSolidWest:1;
+				unsigned int	sideSolidSouth:1;
 			}*	map;
 		};
 		struct PlayerSpawn
