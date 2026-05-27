@@ -34,6 +34,30 @@ extern "C" {
 
 /* ── operator new / delete ──────────────────────────────────────── */
 
+extern char __EH_FRAME_BEGIN__[];
+extern char __FRAME_END__[];
+void __register_frame_info(const void *, void *) __attribute__((weak));
+void __deregister_frame_info(const void *) __attribute__((weak));
+
+static void *__cxa_eh_frame_object[16];
+static int __cxa_eh_frame_registered = 0;
+
+__attribute__((constructor(101)))
+static void __cxa_register_eh_frames(void) {
+    if (__register_frame_info && &__EH_FRAME_BEGIN__[0] != &__FRAME_END__[0]) {
+        __register_frame_info(__EH_FRAME_BEGIN__, __cxa_eh_frame_object);
+        __cxa_eh_frame_registered = 1;
+    }
+}
+
+__attribute__((destructor(101)))
+static void __cxa_deregister_eh_frames(void) {
+    if (__cxa_eh_frame_registered && __deregister_frame_info) {
+        __deregister_frame_info(__EH_FRAME_BEGIN__);
+        __cxa_eh_frame_registered = 0;
+    }
+}
+
 static void __cxa_print_heap_state(void) {
     const struct of_capabilities *caps = of_get_caps();
     void *heap_break = sbrk(0);
