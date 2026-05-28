@@ -45,6 +45,7 @@
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include "of_caps.h"
 #endif
@@ -86,6 +87,15 @@ static void M_PrintOOM(const char *op, size_t size, const char *file, int lineno
 	else
 		printf(" heap_caps=%08lx", (unsigned long)(uintptr_t)caps);
 	printf("\n");
+}
+
+static void M_FatalOOM(const char *op, size_t size, const char *file, int lineno, void *memblock)
+{
+	M_PrintOOM(op, size, file, lineno, memblock);
+	printf("Could not %s %zu bytes\n", op && op[2] == 'R' ? "realloc" : "malloc", size);
+	fflush(stdout);
+	fflush(stderr);
+	abort();
 }
 #else
 static void M_PrintOOM(const char *, size_t, const char *, int, void *) {}
@@ -169,8 +179,12 @@ void *M_Malloc_Dbg(size_t size, const char *file, int lineno)
 
 	if (block == NULL)
 	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		M_FatalOOM("M_Malloc", size, file, lineno, NULL);
+#else
 		M_PrintOOM("M_Malloc", size, file, lineno, NULL);
 		I_FatalError("Could not malloc %zu bytes", size);
+#endif
 	}
 
 	GC::AllocBytes += _msize(block);
@@ -186,8 +200,12 @@ void *M_Realloc_Dbg(void *memblock, size_t size, const char *file, int lineno)
 	void *block = _realloc_dbg(memblock, size, _NORMAL_BLOCK, file, lineno);
 	if (block == NULL)
 	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		M_FatalOOM("M_Realloc", size, file, lineno, memblock);
+#else
 		M_PrintOOM("M_Realloc", size, file, lineno, memblock);
 		I_FatalError("Could not realloc %zu bytes", size);
+#endif
 	}
 	GC::AllocBytes += _msize(block);
 	return block;
@@ -199,8 +217,12 @@ void *M_Malloc_Dbg(size_t size, const char *file, int lineno)
 
 	if (block == NULL)
 	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		M_FatalOOM("M_Malloc", size, file, lineno, NULL);
+#else
 		M_PrintOOM("M_Malloc", size, file, lineno, NULL);
 		I_FatalError("Could not malloc %zu bytes", size);
+#endif
 	}
 
 	size_t *sizeStore = (size_t *) block;
@@ -224,8 +246,12 @@ void *M_Realloc_Dbg(void *memblock, size_t size, const char *file, int lineno)
 
 	if (block == NULL)
 	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		M_FatalOOM("M_Realloc", size, file, lineno, memblock);
+#else
 		M_PrintOOM("M_Realloc", size, file, lineno, memblock);
 		I_FatalError("Could not realloc %zu bytes", size);
+#endif
 	}
 
 	size_t *sizeStore = (size_t *) block;
