@@ -1,0 +1,19 @@
+diff --git a/src/firmware/os/kernel/syscall.c b/src/firmware/os/kernel/syscall.c
+--- a/src/firmware/os/kernel/syscall.c
++++ b/src/firmware/os/kernel/syscall.c
+@@ -1633,10 +1633,12 @@ static void mmap_coalesce_bottom(void) {
+ /* Sized for mallocng's slab-per-size-class arenas: musl's allocator
+  * mmaps a fresh slab the first time any size class is touched, so an
+  * app pulling in many small allocations of diverse sizes can easily
+- * hold ~70+ concurrent slabs.  256 keeps headroom for a heavy workload
+- * without costing much BSS (12 B per slot). */
+-#define MMAP_SLOTS 256
++ * hold hundreds of concurrent slabs once a larger C++ game/runtime has
++ * menus, resource tables, file readers, and texture state alive at the
++ * same time.  1024 costs 12 KB of OS BSS and avoids false ENOMEM when
++ * SDRAM is still available. */
++#define MMAP_SLOTS 1024
+ 
+ typedef struct {
+     uintptr_t base;     /* 0 = slot unused */
+     uintptr_t len;      /* page-aligned */

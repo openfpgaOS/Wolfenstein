@@ -42,6 +42,13 @@
 #include <malloc.h>
 #endif
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#include <stdint.h>
+#include <stdio.h>
+#include <unistd.h>
+#include "of_caps.h"
+#endif
+
 #include "dobject.h"
 
 #ifndef _MSC_VER
@@ -58,7 +65,33 @@
 #define _msize(p)				malloc_usable_size(p)	// from glibc/FreeBSD
 #endif
 
-#ifndef _DEBUG
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+static void M_PrintOOM(const char *op, size_t size, const char *file, int lineno, void *memblock)
+{
+	const struct of_capabilities *caps = of_get_caps();
+	void *heapBreak = sbrk(0);
+	printf("%s: failed %zu bytes at %s:%d", op, size, file ? file : "?", lineno);
+	if(memblock)
+		printf(" old=%zu", _msize(memblock));
+	printf("\n");
+	printf("M_Alloc: GC=%zu brk=%08lx", GC::AllocBytes, (unsigned long)(uintptr_t)heapBreak);
+	if(caps && caps->magic == OF_CAPS_MAGIC)
+	{
+		uintptr_t heapEnd = (uintptr_t)caps->heap_base + caps->heap_size;
+		printf(" heap=%08lx..%08lx (%lu)",
+			(unsigned long)caps->heap_base,
+			(unsigned long)heapEnd,
+			(unsigned long)caps->heap_size);
+	}
+	else
+		printf(" heap_caps=%08lx", (unsigned long)(uintptr_t)caps);
+	printf("\n");
+}
+#else
+static void M_PrintOOM(const char *, size_t, const char *, int, void *) {}
+#endif
+
+#if !defined(_DEBUG) && !(defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC))
 #if !defined(OWN_ADDED_SIZE)
 void *M_Malloc(size_t size)
 {
@@ -135,7 +168,10 @@ void *M_Malloc_Dbg(size_t size, const char *file, int lineno)
 	void *block = _malloc_dbg(size, _NORMAL_BLOCK, file, lineno);
 
 	if (block == NULL)
+	{
+		M_PrintOOM("M_Malloc", size, file, lineno, NULL);
 		I_FatalError("Could not malloc %zu bytes", size);
+	}
 
 	GC::AllocBytes += _msize(block);
 	return block;
@@ -150,6 +186,7 @@ void *M_Realloc_Dbg(void *memblock, size_t size, const char *file, int lineno)
 	void *block = _realloc_dbg(memblock, size, _NORMAL_BLOCK, file, lineno);
 	if (block == NULL)
 	{
+		M_PrintOOM("M_Realloc", size, file, lineno, memblock);
 		I_FatalError("Could not realloc %zu bytes", size);
 	}
 	GC::AllocBytes += _msize(block);
@@ -161,7 +198,10 @@ void *M_Malloc_Dbg(size_t size, const char *file, int lineno)
 	void *block = _malloc_dbg(size+sizeof(size_t), _NORMAL_BLOCK, file, lineno);
 
 	if (block == NULL)
+	{
+		M_PrintOOM("M_Malloc", size, file, lineno, NULL);
 		I_FatalError("Could not malloc %zu bytes", size);
+	}
 
 	size_t *sizeStore = (size_t *) block;
 	*sizeStore = size;
@@ -184,6 +224,7 @@ void *M_Realloc_Dbg(void *memblock, size_t size, const char *file, int lineno)
 
 	if (block == NULL)
 	{
+		M_PrintOOM("M_Realloc", size, file, lineno, memblock);
 		I_FatalError("Could not realloc %zu bytes", size);
 	}
 
@@ -193,6 +234,20 @@ void *M_Realloc_Dbg(void *memblock, size_t size, const char *file, int lineno)
 
 	GC::AllocBytes += _msize(block);
 	return block;
+}
+#endif
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#undef M_Malloc
+#undef M_Realloc
+void *M_Malloc(size_t size)
+{
+	return M_Malloc_Dbg(size, "unknown", 0);
+}
+
+void *M_Realloc(void *memblock, size_t size)
+{
+	return M_Realloc_Dbg(memblock, size, "unknown", 0);
 }
 #endif
 #endif

@@ -41,7 +41,7 @@
 // except they bomb out with a fatal error
 // when they can't get the memory.
 
-#if defined(_DEBUG)
+#if defined(_DEBUG) || (defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC))
 #define M_Malloc(s)		M_Malloc_Dbg(s, __FILE__, __LINE__)
 #define M_Realloc(p,s)	M_Realloc_Dbg(p, s, __FILE__, __LINE__)
 
