@@ -76,7 +76,22 @@ public:
 	// you must call ResetFilePtr() before using this class again.
 	void ResetFilePtr ();
 
-	FILE *GetFile () const { return File; }
+	FILE *GetFile () const
+	{
+#if defined(OF_ECWOLF_OPENFPGA)
+		// A slurped reader behaves like an in-memory file: report no FILE* so
+		// callers (FWadLump, IsUncompressedFile) take the cache path instead of
+		// seeking the now-closed stream.
+		if (Slurped) return NULL;
+#endif
+		return File;
+	}
+	// NOTE: a slurped FileReader intentionally returns NULL here (not the
+	// buffer). That routes lump caching through the standard copy path
+	// (FUncompressedLump::FillCache -> Read()), which our Read() serves from
+	// the slurp buffer. Returning the buffer would zero-copy a mid-buffer
+	// pointer with RefCount -1; the copy path is simpler and avoids any
+	// lifetime/free hazard on this memory-fragile target.
 	virtual const char *GetBuffer() const { return NULL; }
 
 	FileReader &operator>> (BYTE &v)
@@ -122,9 +137,20 @@ protected:
 	long Length;
 	long StartPos;
 	long FilePos;
+#if defined(OF_ECWOLF_OPENFPGA)
+	// OpenFPGA APF data slots are streamed and ignore random fseek(); on Open()
+	// the whole file is read sequentially into Buffer and every Read()/Seek()/
+	// Tell() is served from it, mirroring MemoryReader (see files.cpp).
+	char *Buffer;
+	long BufferLen;
+	bool Slurped;
+#endif
 
 private:
 	long CalcFileLen () const;
+#if defined(OF_ECWOLF_OPENFPGA)
+	bool SlurpStream (const char *filename, long knownLength);
+#endif
 protected:
 	bool CloseOnDestruct;
 };

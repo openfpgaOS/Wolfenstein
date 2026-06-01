@@ -27,6 +27,7 @@
 #include "g_mapinfo.h"
 #include "a_inventory.h"
 #include "am_map.h"
+#include "of_ecwolf_gpu.h"
 
 /*
 =============================================================================
@@ -445,7 +446,7 @@ void PollMouseMove (void)
 		int mousey = control[ConsolePlayer].controlpany;
 
 		if(players[ConsolePlayer].ReadyWeapon && players[ConsolePlayer].ReadyWeapon->fovscale > 0)
-			mousey = xs_ToInt(control[ConsolePlayer].controlpany*fabs(players[ConsolePlayer].ReadyWeapon->fovscale));
+			mousey = xs_ToInt(control[ConsolePlayer].controlpany*fabsf(players[ConsolePlayer].ReadyWeapon->fovscale));
 
 		players[ConsolePlayer].mo->pitch += mousey * (ANGLE_1 / (21 - mouseyadjustment));
 		if(players[ConsolePlayer].mo->pitch+ANGLE_180 > ANGLE_180+56*ANGLE_1)
@@ -819,13 +820,17 @@ int StopMusic (void)
 
 void StartMusic ()
 {
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 	SD_MusicOff ();
+#endif
 	SD_StartMusic(levelInfo->GetMusic(map));
 }
 
 void ContinueMusic (int offs)
 {
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 	SD_MusicOff ();
+#endif
 	if(!(Paused & 1))
 		SD_ContinueMusic(levelInfo->GetMusic(map), offs);
 }
@@ -995,6 +1000,12 @@ void PlayFrame()
 	UpdatePaletteShifts ();
 
 	ThreeDRefresh ();
+
+	if((automap && !gamestate.victoryflag) || (Paused & 1) ||
+		Net::IsBlocked() || (!loadedgame && viewsize != 21) || screenfaded)
+	{
+		OF_WolfGPU_FallbackToCPU();
+	}
 
 	if(automap && !gamestate.victoryflag)
 		BasicOverhead();

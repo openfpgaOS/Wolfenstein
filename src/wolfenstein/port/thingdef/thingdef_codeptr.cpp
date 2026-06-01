@@ -327,7 +327,7 @@ ACTION_FUNCTION(A_Explode)
 	if(alert)
 		madenoise = true;
 
-	const double rolloff = 1.0/static_cast<double>(radius - fulldamageradius);
+	const float rolloff = 1.0f/static_cast<float>(radius - fulldamageradius);
 	for(AActor::Iterator iter = AActor::GetIterator();iter.Next();)
 	{
 		AActor * const target = iter;
@@ -343,10 +343,10 @@ ACTION_FUNCTION(A_Explode)
 			!((self->target && self->target->player) ^ (!!target->player)))
 			continue;
 
-		double output = damage;
+		float output = damage;
 		if(dist > fulldamageradius)
-			output *= 1.0 - static_cast<double>(dist - fulldamageradius)*rolloff;
-		if(output <= 0.0)
+			output *= 1.0f - static_cast<float>(dist - fulldamageradius)*rolloff;
+		if(output <= 0.0f)
 			continue;
 
 		DamageActor(target, self->target, static_cast<unsigned int>(output));

@@ -5,7 +5,7 @@
  * launching the application. Apps read it to discover the platform,
  * available hardware, memory layout, and OS services.
  *
- * This replaces hardcoded addresses (framebuffer base, sample pool,
+ * This replaces hardcoded addresses (framebuffer base, audio reserve,
  * GPU MMIO window, ...) and enables the same app binary to run on
  * different targets (Pocket, MiSTer) and core variants (full, lite, 3d).
  *
@@ -55,8 +55,6 @@ extern "C" {
 #define OF_HW_GPU_PARAM_SPAN_ZTEST (1 << 17) /* Param-span Quake-compatible z test/write */
 #define OF_HW_GPU_PARAM_SPAN_Q29_SCALE (1 << 18) /* Param-span Q29 dynamic scale */
 
-#define OF_EMIT_CAP_PARAM_SPAN_Q29_SCALE OF_HW_GPU_PARAM_SPAN_Q29_SCALE
-
 /* Convenience: all the GPU bits an app might care about for renderer choice. */
 #define OF_HW_GPU_LITE_MASK  (OF_HW_GPU_SPAN | OF_HW_GPU_FRAGPIPE)
 #define OF_HW_GPU_FULL_MASK  (OF_HW_GPU_LITE_MASK | OF_HW_GPU_VCOLOR | \
@@ -74,8 +72,8 @@ struct of_capabilities {
     uint32_t fb_width;          /* Framebuffer width in pixels */
     uint32_t fb_height;         /* Framebuffer height in pixels */
     uint32_t fb_stride;         /* Bytes per row */
-    uint32_t sample_base;       /* Audio sample pool base address */
-    uint32_t sample_size;       /* Audio sample pool size in bytes */
+    uint32_t sample_base;       /* Persistent audio reservation base */
+    uint32_t sample_size;       /* Persistent audio reservation bytes */
 
     /* Hardware features */
     uint32_t hw_features;       /* OF_HW_* bitmask */
@@ -91,9 +89,6 @@ struct of_capabilities {
     /* OS info */
     uint32_t os_version;        /* Packed: major.minor.patch */
     uint32_t cpu_freq_hz;       /* CPU clock frequency */
-    uint32_t services_table;    /* Address of OS services table (0 = none).
-                                 * Legacy: new apps get the same pointer
-                                 * via the AT_OF_SVC auxv tag. */
 
     /* Memory bases for inline accessors that need to translate
      * pointers without hardcoding target addresses. Added in v2. */

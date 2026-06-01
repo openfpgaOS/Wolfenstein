@@ -27,14 +27,16 @@ static void of_ecwolf_select_data_extension(void)
     if (current && current[0])
         return;
 
-    if (of_ecwolf_slot_matches(14, "Wolfenstein3D.cue") ||
-        of_ecwolf_slot_matches(15, "Wolfenstein3D.bin"))
+    /* The game data files are referenced directly as data slots (not a mounted
+     * CUE/BIN), so pick the ECWolf data extension from whichever VSWAP variant
+     * the instance bound. */
+    uint32_t slot = 0;
+    if (of_file_slot_find("VSWAP.WL6", &slot) == 0)
     {
         setenv("ECWOLF_DATA_EXT", "wl6", 1);
         printf("OpenFPGA: selecting ECWolf data extension .wl6.\n");
     }
-    else if (of_ecwolf_slot_matches(14, "Spear of Destiny (USA).cue") ||
-             of_ecwolf_slot_matches(15, "Spear of Destiny (USA).bin"))
+    else if (of_file_slot_find("VSWAP.SOD", &slot) == 0)
     {
         setenv("ECWOLF_DATA_EXT", "sod", 1);
         printf("OpenFPGA: selecting ECWolf data extension .sod.\n");
@@ -81,16 +83,19 @@ static void of_ecwolf_openfpga_init(void)
     of_ecwolf_setenv_default("XDG_DATA_HOME", "/");
     of_ecwolf_select_data_extension();
 
+    of_file_slot_register(4, "wolfmidi.zip");
     of_file_slot_register(7, "bank.ofsf");
     of_ecwolf_log_bank_status();
-    of_file_slot_register(20, "ecwolf.cfg");
-    if (of_iso_mount("slot:14", "/cd") < 0)
-        of_iso_mount("slot:15", "/cd");
+    of_file_slot_register(8, "ecwolf.cfg");
+    /* No disc image to mount: the game's AUDIOHED/AUDIOT/GAMEMAPS/MAPHEAD/
+     * VGADICT/VGAGRAPH/VGAHEAD/VSWAP files are bound to data slots by the
+     * instance and auto-discovered, so ECWolf finds them directly in the
+     * virtual root ($PROGDIR) instead of via the /cd ISO bridge. */
 
     for (int i = 0; i < 10; i++)
     {
         snprintf(name, sizeof(name), "savegam%d.ecs", i);
-        of_file_slot_register((uint32_t)(21 + i), name);
+        of_file_slot_register((uint32_t)(10 + i), name);
     }
 }
 

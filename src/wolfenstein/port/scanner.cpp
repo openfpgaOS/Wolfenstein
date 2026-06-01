@@ -612,7 +612,7 @@ bool Scanner::GetNextToken(bool expandState)
 			}
 			else
 			{
-				nextState.decimal = atof(SCString_GetChars(nextState.str));
+				nextState.decimal = strtof(SCString_GetChars(nextState.str), NULL);
 				nextState.number = static_cast<int> (nextState.decimal);
 				nextState.boolean = (nextState.number != 0);
 			}

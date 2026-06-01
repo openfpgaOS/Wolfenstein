@@ -857,27 +857,54 @@ void FTextureManager::AddTexturesForWad(int wadnum)
 {
 	int firsttexture = Textures.Size();
 	int lumpcount = Wads.GetNumLumps();
+#ifdef OF_ECWOLF_OPENFPGA
+	uint32_t wadStart = SDL_GetTicks();
+	uint32_t stepStart = wadStart;
+	const char *wadName = Wads.GetWadName(wadnum);
+#define OF_TEXMAN_WAD_STEP(name) do { \
+	uint32_t now = SDL_GetTicks(); \
+	printf("TexMan.Init: %s %s took %lu ms (%d textures).\n", \
+		wadName ? wadName : "<unknown>", name, (unsigned long)(now - stepStart), \
+		(int)Textures.Size() - firsttexture); \
+	stepStart = now; \
+} while (0)
+#endif
 
 	FirstTextureForFile.Push(firsttexture);
 
 	// First step: Load sprites
 	AddGroup(wadnum, ns_sprites, FTexture::TEX_Sprite);
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_WAD_STEP("sprites");
+#endif
 
 	// Composite ROTT skies
 	AddRottSkies(wadnum);
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_WAD_STEP("rott-skies");
+#endif
 
 	// When loading a Zip, all graphics in the patches/ directory should be
 	// added as well.
 	AddGroup(wadnum, ns_patches, FTexture::TEX_WallPatch);
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_WAD_STEP("patches");
+#endif
 
 	// Second step: TEXTUREx lumps
 	//LoadTextureX(wadnum);
 
 	// Third step: Flats
 	AddGroup(wadnum, ns_flats, FTexture::TEX_Flat);
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_WAD_STEP("flats");
+#endif
 
 	// Fourth step: Textures (TX_)
 	AddGroup(wadnum, ns_newtextures, FTexture::TEX_Override);
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_WAD_STEP("newtextures");
+#endif
 
 	// Sixth step: Try to find any lump in the WAD that may be a texture and load as a TEX_MiscPatch
 	int firsttx = Wads.GetFirstLump(wadnum);
@@ -923,15 +950,31 @@ void FTextureManager::AddTexturesForWad(int wadnum)
 			AddTexture (out);
 		}
 	}
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_WAD_STEP("global-scan");
+#endif
 
 	// Check for text based texture definitions
 	LoadTextureDefs(wadnum, "TEXTURES");
 	//LoadTextureDefs(wadnum, "HIRESTEX");
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_WAD_STEP("texture-defs");
+#endif
 
 	// Seventh step: Check for hires replacements.
 	AddHiresTextures(wadnum);
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_WAD_STEP("hires");
+#endif
 
 	SortTexturesByType(firsttexture, Textures.Size());
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_WAD_STEP("sort");
+	printf("TexMan.Init: %s total took %lu ms (%d new textures, %d lumps total).\n",
+		wadName ? wadName : "<unknown>", (unsigned long)(SDL_GetTicks() - wadStart),
+		(int)Textures.Size() - firsttexture, lumpcount);
+#undef OF_TEXMAN_WAD_STEP
+#endif
 }
 
 //==========================================================================
@@ -998,27 +1041,59 @@ void FTextureManager::SortTexturesByType(int start, int end)
 
 void FTextureManager::Init()
 {
+#ifdef OF_ECWOLF_OPENFPGA
+	uint32_t initStart = SDL_GetTicks();
+	uint32_t stepStart = initStart;
+#define OF_TEXMAN_INIT_STEP(name) do { \
+	uint32_t now = SDL_GetTicks(); \
+	printf("TexMan.Init: %s took %lu ms (%d textures).\n", \
+		name, (unsigned long)(now - stepStart), (int)Textures.Size()); \
+	stepStart = now; \
+} while (0)
+#endif
 	DeleteAll();
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_INIT_STEP("DeleteAll");
+#endif
 	// Init Build Tile data if it hasn't been done already
 	//if (BuildTileFiles.Size() == 0) CountBuildTiles ();
 	FTexture::InitGrayMap();
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_INIT_STEP("InitGrayMap");
+#endif
 
 	// Texture 0 is a dummy texture used to indicate "no texture"
 	AddTexture (new FDummyTexture);
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_INIT_STEP("dummy-texture");
+#endif
 
 	// Pull in Mac HUD graphics, which we do first so that hopefully anything
 	// can override them.
 	InitMacHud ();
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_INIT_STEP("InitMacHud");
+#endif
 
 	int wadcnt = Wads.GetNumWads();
+#ifdef OF_ECWOLF_OPENFPGA
+	printf("TexMan.Init: scanning %d resource files and %d lumps.\n",
+		wadcnt, Wads.GetNumLumps());
+#endif
 	for(int i = 0; i< wadcnt; i++)
 	{
 		AddTexturesForWad(i);
+#ifdef OF_ECWOLF_OPENFPGA
+		OF_TEXMAN_INIT_STEP("resource-file");
+#endif
 	}
 	for (unsigned i = 0; i < Textures.Size(); i++)
 	{
 		Textures[i].Texture->ResolvePatches();
 	}
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_INIT_STEP("ResolvePatches");
+#endif
 
 	// Add one marker so that the last WAD is easier to handle and treat
 	// Build tiles as a completely separate block.
@@ -1027,12 +1102,30 @@ void FTextureManager::Init()
 	//FirstTextureForFile.Push(Textures.Size());
 
 	DefaultTexture = CheckForTexture ("-NOFLAT-", FTexture::TEX_Override, 0);
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_INIT_STEP("DefaultTexture");
+#endif
 
 	//InitAnimated();
 	InitAnimDefs();
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_INIT_STEP("InitAnimDefs");
+#endif
 	FixAnimations();
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_INIT_STEP("FixAnimations");
+#endif
 	InitSwitchList();
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_INIT_STEP("InitSwitchList");
+#endif
 	InitPalettedVersions();
+#ifdef OF_ECWOLF_OPENFPGA
+	OF_TEXMAN_INIT_STEP("InitPalettedVersions");
+	printf("TexMan.Init: total detail took %lu ms.\n",
+		(unsigned long)(SDL_GetTicks() - initStart));
+#undef OF_TEXMAN_INIT_STEP
+#endif
 }
 
 //==========================================================================

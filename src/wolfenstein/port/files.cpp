@@ -42,6 +42,118 @@
 #include "filesys.h"
 #include "templates.h"
 #include "zdoomsupport.h"
+#if defined(OF_ECWOLF_OPENFPGA)
+#include <stdint.h>
+#endif
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#include "of_file.h"
+#include "of_services.h"
+#endif
+
+#if defined(OF_ECWOLF_OPENFPGA)
+static const long OF_ECWOLF_MAX_SLURP = 32 * 1024 * 1024;
+static const long OF_ECWOLF_SLURP_CHUNK = 32 * 1024;
+
+#if !defined(OF_PC)
+static volatile int OFSlurpReadDone;
+static volatile int OFSlurpReadResult;
+
+static void OFSlurpReadCallback(int, int result)
+{
+	OFSlurpReadResult = result;
+	OFSlurpReadDone = 1;
+}
+
+static long OFFileSizeService(const char *filename, FILE *file)
+{
+	if (OF_SVC == NULL || OF_SVC->magic != OF_SVC_MAGIC)
+		return -1;
+
+	long zeroLength = -1;
+	if (file != NULL &&
+		OF_SVC->count > OF_FILE_SVC_INDEX(file_size_fd) &&
+		OF_SVC->file_size_fd != NULL)
+	{
+		long len = OF_SVC->file_size_fd(fileno(file));
+		if (len > 0)
+			return len;
+		if (len == 0)
+			zeroLength = 0;
+	}
+
+	if (filename != NULL &&
+		OF_SVC->count > OF_FILE_SVC_INDEX(file_size) &&
+		OF_SVC->file_size != NULL)
+	{
+		long len = OF_SVC->file_size(filename);
+		if (len > 0)
+			return len;
+		if (len == 0)
+			zeroLength = 0;
+	}
+
+	return zeroLength;
+}
+
+static bool OFReadSlotBlocking(uint32_t slot, uint32_t offset, void *dest, uint32_t length)
+{
+	unsigned char *out = (unsigned char *)dest;
+	uint32_t maxRead = of_file_async_max_read();
+	if (maxRead == 0 || maxRead > (uint32_t)OF_ECWOLF_SLURP_CHUNK)
+		maxRead = (uint32_t)OF_ECWOLF_SLURP_CHUNK;
+
+	while (length > 0)
+	{
+		uint32_t chunk = length < maxRead ? length : maxRead;
+		OFSlurpReadDone = 0;
+		OFSlurpReadResult = -1;
+
+		int token = of_file_read_async((int)slot, offset, out, chunk, OFSlurpReadCallback);
+		if (token < 0)
+			return false;
+
+		while (!OFSlurpReadDone)
+		{
+			of_file_async_poll();
+			if (!of_file_async_busy())
+				break;
+		}
+		if (!OFSlurpReadDone || OFSlurpReadResult < 0)
+			return false;
+
+		offset += chunk;
+		out += chunk;
+		length -= chunk;
+	}
+
+	return true;
+}
+
+static bool OFSlurpSlot(const char *filename, long knownLength, char **buffer, long *bufferLength)
+{
+	if (filename == NULL || knownLength <= 0 || knownLength > OF_ECWOLF_MAX_SLURP)
+		return false;
+
+	uint32_t slot = 0;
+	if (of_file_slot_find(filename, &slot) < 0)
+		return false;
+
+	char *buf = (char *)malloc((size_t)knownLength);
+	if (buf == NULL)
+		return false;
+
+	if (!OFReadSlotBlocking(slot, 0, buf, (uint32_t)knownLength))
+	{
+		free(buf);
+		return false;
+	}
+
+	*buffer = buf;
+	*bufferLength = knownLength;
+	return true;
+}
+#endif
+#endif
 
 //==========================================================================
 //
@@ -51,19 +163,25 @@
 //
 //==========================================================================
 
+#if defined(OF_ECWOLF_OPENFPGA)
+#define OF_SLURP_INIT , Buffer(NULL), BufferLen(0), Slurped(false)
+#else
+#define OF_SLURP_INIT
+#endif
+
 FileReader::FileReader ()
-: File(NULL), Length(0), StartPos(0), FilePos(0), CloseOnDestruct(false)
+: File(NULL), Length(0), StartPos(0), FilePos(0) OF_SLURP_INIT, CloseOnDestruct(false)
 {
 }
 
 FileReader::FileReader (const FileReader &other, long length)
-: File(other.File), Length(length), CloseOnDestruct(false)
+: File(other.File), Length(length) OF_SLURP_INIT, CloseOnDestruct(false)
 {
 	FilePos = StartPos = ftell (other.File);
 }
 
 FileReader::FileReader (const char *filename)
-: File(NULL), Length(0), StartPos(0), FilePos(0), CloseOnDestruct(false)
+: File(NULL), Length(0), StartPos(0), FilePos(0) OF_SLURP_INIT, CloseOnDestruct(false)
 {
 	if (!Open(filename))
 	{
@@ -72,19 +190,28 @@ FileReader::FileReader (const char *filename)
 }
 
 FileReader::FileReader (FILE *file)
-: File(file), Length(0), StartPos(0), FilePos(0), CloseOnDestruct(false)
+: File(file), Length(0), StartPos(0), FilePos(0) OF_SLURP_INIT, CloseOnDestruct(false)
 {
 	Length = CalcFileLen();
 }
 
 FileReader::FileReader (FILE *file, long length)
-: File(file), Length(length), CloseOnDestruct(true)
+: File(file), Length(length) OF_SLURP_INIT, CloseOnDestruct(true)
 {
 	FilePos = StartPos = ftell (file);
 }
 
+#undef OF_SLURP_INIT
+
 FileReader::~FileReader ()
 {
+#if defined(OF_ECWOLF_OPENFPGA)
+	if (Slurped && Buffer != NULL)
+	{
+		free (Buffer);
+		Buffer = NULL;
+	}
+#endif
 	if (CloseOnDestruct && File != NULL)
 	{
 		fclose (File);
@@ -99,9 +226,123 @@ bool FileReader::Open (const char *filename)
 	FilePos = 0;
 	StartPos = 0;
 	CloseOnDestruct = true;
+#if defined(OF_ECWOLF_OPENFPGA)
+	// Game data files are read with scattered Seek()/Read() calls. On the
+	// OpenFPGA target those files are deferred APF data slots, so make each
+	// FileReader an in-memory reader up front. Prefer the direct slot DMA path
+	// when the OS exposes an exact size; keep a sequential stdio slurp as a
+	// fallback for older kernels and non-slot files.
+	long knownLength = -1;
+#if !defined(OF_PC)
+	knownLength = OFFileSizeService(filename, File);
+#endif
+	if (SlurpStream(filename, knownLength))
+	{
+		fclose (File);
+		File = NULL;
+		CloseOnDestruct = false;
+		return true;
+	}
+
+	fclose(File);
+	File = ::File(filename).open("rb");
+	if (File == NULL)
+		return false;
+	FilePos = 0;
+	StartPos = 0;
+	CloseOnDestruct = true;
+	// Slurp failed (empty file or read error): fall back to streaming so we are
+	// never worse than before. Log it: on this target streaming means scattered
+	// reads may be slow or broken, so a game-data file landing here is the thing
+	// to investigate.
+	printf ("FileReader: NOT slurped, streaming fallback: %s\n", filename);
+#endif
 	Length = CalcFileLen();
 	return true;
 }
+
+#if defined(OF_ECWOLF_OPENFPGA)
+bool FileReader::SlurpStream (const char *filename, long knownLength)
+{
+#if !defined(OF_PC)
+	char *slotBuffer = NULL;
+	long slotLength = 0;
+	if (OFSlurpSlot(filename, knownLength, &slotBuffer, &slotLength))
+	{
+		Buffer = slotBuffer;
+		BufferLen = slotLength;
+		Length = slotLength;
+		FilePos = 0;
+		StartPos = 0;
+		Slurped = true;
+		return true;
+	}
+#endif
+
+	// Read the whole stream start-to-EOF into RAM. Do not call fseek() before
+	// this: a fresh FILE is already at offset 0, and some APF-backed streams
+	// enter a bad state after even a rewind probe. Also avoid realloc(); grow
+	// via small chunks, then copy once into the final buffer.
+
+	struct SlurpChunk { char *raw; char *data; long len; SlurpChunk *next; };
+	SlurpChunk *head = NULL, *tail = NULL;
+	long total = 0;
+	bool ok = true;
+
+	for (;;)
+	{
+		char *raw = (char *)malloc ((size_t)OF_ECWOLF_SLURP_CHUNK + 511);
+		if (raw == NULL) { ok = false; break; }
+		char *cd = (char *)(((uintptr_t)raw + 511u) & ~(uintptr_t)511u);
+		long got = (long)fread (cd, 1, (size_t)OF_ECWOLF_SLURP_CHUNK, File);
+		if (got <= 0) { free (raw); if (ferror (File)) ok = false; break; }
+
+		SlurpChunk *c = (SlurpChunk *)malloc (sizeof (SlurpChunk));
+		if (c == NULL) { free (raw); ok = false; break; }
+		c->raw = raw; c->data = cd; c->len = got; c->next = NULL;
+		if (tail) tail->next = c; else head = c;
+		tail = c;
+
+		total += got;
+		if (total > OF_ECWOLF_MAX_SLURP) { ok = false; break; }
+		if (knownLength > 0 && total >= knownLength) break;
+		if (feof (File)) break;
+	}
+
+	if (knownLength > 0 && total != knownLength)
+		ok = false;
+
+	char *buf = (ok && total > 0) ? (char *)malloc ((size_t)total) : NULL;
+	if (buf != NULL)
+	{
+		long pos = 0;
+		for (SlurpChunk *c = head; c != NULL; c = c->next)
+		{
+			memcpy (buf + pos, c->data, (size_t)c->len);
+			pos += c->len;
+		}
+	}
+
+	for (SlurpChunk *c = head; c != NULL; )         // free the chunk chain
+	{
+		SlurpChunk *n = c->next;
+		free (c->raw);
+		free (c);
+		c = n;
+	}
+
+	if (buf == NULL)
+		return false;
+
+	Buffer = buf;
+	BufferLen = total;
+	Length = total;
+	FilePos = 0;
+	StartPos = 0;
+	Slurped = true;
+	return true;
+}
+#endif
 
 
 void FileReader::ResetFilePtr ()
@@ -128,6 +369,16 @@ long FileReader::Seek (long offset, int origin)
 	{
 		offset += StartPos + Length;
 	}
+#if defined(OF_ECWOLF_OPENFPGA)
+	if (Slurped)
+	{
+		// In-RAM seek (StartPos is 0 when slurped); clamp like MemoryReader.
+		if (offset < StartPos) offset = StartPos;
+		else if (offset > StartPos + Length) offset = StartPos + Length;
+		FilePos = offset;
+		return 0;
+	}
+#endif
 	if (0 == fseek (File, offset, SEEK_SET))
 	{
 		FilePos = offset;
@@ -144,6 +395,15 @@ long FileReader::Read (void *buffer, long len)
 	{
 		len = Length - FilePos + StartPos;
 	}
+#if defined(OF_ECWOLF_OPENFPGA)
+	if (Slurped)
+	{
+		if (len <= 0) return 0;
+		memcpy (buffer, Buffer + FilePos, len);
+		FilePos += len;
+		return len;
+	}
+#endif
 	len = (long)fread (buffer, 1, len, File);
 	FilePos += len;
 	return len;
@@ -151,6 +411,10 @@ long FileReader::Read (void *buffer, long len)
 
 char *FileReader::Gets(char *strbuf, int len)
 {
+#if defined(OF_ECWOLF_OPENFPGA)
+	if (Slurped)
+		return GetsFromBuffer(Buffer, strbuf, len);
+#endif
 	if (len <= 0 || FilePos >= StartPos + Length) return NULL;
 	char *p = fgets(strbuf, len, File);
 	if (p != NULL)
@@ -197,6 +461,11 @@ char *FileReader::GetsFromBuffer(const char * bufptr, char *strbuf, int len)
 
 long FileReader::CalcFileLen() const
 {
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	long serviceLen = OFFileSizeService(NULL, File);
+	if (serviceLen > 0)
+		return serviceLen;
+#endif
 	long endpos;
 
 	fseek (File, 0, SEEK_END);

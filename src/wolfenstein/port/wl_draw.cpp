@@ -1,5 +1,7 @@
 // WL_DRAW.C
 
+#include <string.h>
+
 #include "wl_def.h"
 #include "id_sd.h"
 #include "id_in.h"
@@ -27,6 +29,31 @@
 #include "wl_state.h"
 #include "a_inventory.h"
 #include "thingdef/thingdef.h"
+#include "of_ecwolf_gpu.h"
+#include "of_ecwolf_fast_renderer.h"
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#include "of_video.h"
+#endif
+
+#if defined(OF_ECWOLF_GPU_WALLS) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#define OF_ECWOLF_WALL_GPU_ENABLED 1
+#endif
+
+#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#define OF_ECWOLF_SPRITE_GPU_ENABLED 1
+#endif
+
+#if defined(OF_ECWOLF_GPU_FLOORCEILING) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#define OF_ECWOLF_FLOOR_GPU_ENABLED 1
+#endif
+
+#if defined(OF_ECWOLF_GPU_SKY) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#define OF_ECWOLF_SKY_GPU_ENABLED 1
+#endif
+
+#if defined(OF_ECWOLF_SPRITE_GPU_ENABLED) || defined(OF_ECWOLF_FLOOR_GPU_ENABLED)
+#define OF_ECWOLF_POSTWALL_GPU_ENABLED 1
+#endif
 
 /*
 =============================================================================
@@ -51,7 +78,9 @@
 */
 
 void DrawFloorAndCeiling(byte *vbuf, unsigned vbufPitch, int min_wallheight);
+bool DrawFloorAndCeilingBackdropFastGPU(byte *vbuf, unsigned vbufPitch);
 void DrawParallax(byte *vbuf, unsigned vbufPitch);
+bool HasParallax(void);
 
 const RatioInformation AspectCorrection[] =
 {
@@ -265,7 +294,8 @@ void ScalePost()
 
 	const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
 	const int tz = FixedMul(r_depthvisibility<<8, wallheight[postx]);
-	BYTE *curshades = &NormalLight.Maps[GETPALOOKUP(MAX(tz, MINZ), shade)<<8];
+	const int shadeIndex = GETPALOOKUP(MAX(tz, MINZ), shade);
+	BYTE *curshades = &NormalLight.Maps[shadeIndex<<8];
 
 	ywcount = yd = wallheight[postx];
 	if(yd <= 0)
@@ -298,6 +328,28 @@ void ScalePost()
 	}
 	if(yw < 0)
 		yw = (texyscale>>2) - ((-yw) % (texyscale>>2));
+
+#if defined(OF_ECWOLF_WALL_GPU_ENABLED)
+	{
+		const int sourceLen = texyscale >> 2;
+		const int topRow = (yoffs - postx) / (int)vbufPitch;
+		const int bottomRow = yendoffs;
+		const int count = bottomRow - topRow + 1;
+		if(count > 0 && yd > 0 && sourceLen > 0)
+		{
+			const int texstep = int(((int64_t)texyscale << FRACBITS) / yd);
+			const int texfracBottom = ((yw + 1) << FRACBITS) - 1;
+			const int texfrac = texfracBottom - texstep * (count - 1);
+			byte *dest = vbuf + topRow * (int)vbufPitch + postx;
+			if(OF_WolfGPU_DrawColumn(dest, count, postsource, sourceLen,
+				texfrac, texstep, shadeIndex))
+			{
+				return;
+			}
+			OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, vbufPitch);
+		}
+	}
+#endif
 
 	col = curshades[postsource[yw]];
 	yendoffs = yendoffs * vbufPitch + postx;
@@ -1191,7 +1243,36 @@ void ThreeDStartFadeIn()
 
 void R_RenderView()
 {
+#if defined(OF_ECWOLF_PROFILE_FRAME)
+	const uint32_t profileFrameStart = SDL_GetTicks();
+	uint32_t profileStageStart = profileFrameStart;
+	uint32_t profileWallMs = 0;
+	uint32_t profileSkyMs = 0;
+	uint32_t profileFloorMs = 0;
+	uint32_t profileSpriteMs = 0;
+#endif
+	bool fastBackdrop = false;
+	const bool hasParallax = HasParallax();
+
 	CalcViewVariables();
+	viewshift = FixedMul(focallengthy,
+		finetangent[(ANGLE_180 + players[ConsolePlayer].camera->pitch) >>
+			ANGLETOFINESHIFT]);
+	{
+		const angle_t bobangle =
+			((gamestate.TimeCount << 13) / (20 * TICRATE / 35)) & FINEMASK;
+		const fixed playerMovebob =
+			players[ConsolePlayer].mo->GetClass()->Meta.GetMetaFixed(APMETA_MoveBob);
+		const fixed curbob = gamestate.victoryflag ? 0 :
+			FixedMul(FixedMul(players[ConsolePlayer].bob, playerMovebob) >> 1,
+				finesine[bobangle]);
+		viewz = curbob - players[ConsolePlayer].mo->viewheight;
+	}
+
+#if defined(OF_ECWOLF_WALL_GPU_ENABLED)
+	if(!hasParallax)
+		fastBackdrop = DrawFloorAndCeilingBackdropFastGPU(vbuf, vbufPitch);
+#endif
 
 //
 // follow the walls from there to the right, drawing as we go
@@ -1201,14 +1282,49 @@ void R_RenderView()
 		DrawStarSky(vbuf, vbufPitch);
 #endif
 
-	WallRefresh ();
+	if(!OF_WolfFastRenderer_RenderWalls(vbuf, vbufPitch))
+		WallRefresh ();
+#if defined(OF_ECWOLF_WALL_GPU_ENABLED) && !defined(OF_ECWOLF_SKY_GPU_ENABLED)
+	if(hasParallax || !fastBackdrop)
+		OF_WolfGPU_EndFrame();
+#endif
+#if defined(OF_ECWOLF_PROFILE_FRAME)
+	{
+		const uint32_t now = SDL_GetTicks();
+		profileWallMs = now - profileStageStart;
+		profileStageStart = now;
+	}
+#endif
 
-	DrawParallax(vbuf, vbufPitch);
+	if(hasParallax)
+		DrawParallax(vbuf, vbufPitch);
+#if defined(OF_ECWOLF_PROFILE_FRAME)
+	{
+		const uint32_t now = SDL_GetTicks();
+		profileSkyMs = now - profileStageStart;
+		profileStageStart = now;
+	}
+#endif
 #if 0 // USE_CLOUDSKY
 	if(GetFeatureFlags() & FF_CLOUDSKY)
 		DrawClouds(vbuf, vbufPitch, min_wallheight);
 #endif
-	DrawFloorAndCeiling(vbuf, vbufPitch, min_wallheight);
+	if(!fastBackdrop)
+		DrawFloorAndCeiling(vbuf, vbufPitch, min_wallheight);
+#if defined(OF_ECWOLF_SPRITE_GPU_ENABLED)
+	if(!OF_WolfGPU_IsActive())
+		OF_WolfGPU_BeginFrame(vbuf, vbufPitch, viewheight);
+#elif defined(OF_ECWOLF_WALL_GPU_ENABLED)
+	if(fastBackdrop)
+		OF_WolfGPU_EndFrame();
+#endif
+#if defined(OF_ECWOLF_PROFILE_FRAME)
+	{
+		const uint32_t now = SDL_GetTicks();
+		profileFloorMs = now - profileStageStart;
+		profileStageStart = now;
+	}
+#endif
 
 //
 // draw all the scaled images
@@ -1225,9 +1341,51 @@ void R_RenderView()
 #endif
 
 	DrawPlayerWeapon ();    // draw player's hands
-
-	if((control[ConsolePlayer].buttonstate[bt_showstatusbar] || control[ConsolePlayer].buttonheld[bt_showstatusbar]) && viewsize == 21)
+#if defined(OF_ECWOLF_PROFILE_FRAME)
 	{
+		static uint32_t totalFrames;
+		static uint32_t totalWallMs;
+		static uint32_t totalSkyMs;
+		static uint32_t totalFloorMs;
+		static uint32_t totalSpriteMs;
+		static uint32_t totalFrameMs;
+
+		const uint32_t now = SDL_GetTicks();
+		profileSpriteMs = now - profileStageStart;
+
+		totalFrames++;
+		totalWallMs += profileWallMs;
+		totalSkyMs += profileSkyMs;
+		totalFloorMs += profileFloorMs;
+		totalSpriteMs += profileSpriteMs;
+		totalFrameMs += now - profileFrameStart;
+		if(totalFrames >= 30)
+		{
+			printf("Frame profile: total=%lu wall=%lu sky=%lu floor=%lu sprites=%lu ms/frame\n",
+				(unsigned long)(totalFrameMs / totalFrames),
+				(unsigned long)(totalWallMs / totalFrames),
+				(unsigned long)(totalSkyMs / totalFrames),
+				(unsigned long)(totalFloorMs / totalFrames),
+				(unsigned long)(totalSpriteMs / totalFrames));
+			totalFrames = 0;
+			totalWallMs = 0;
+			totalSkyMs = 0;
+			totalFloorMs = 0;
+			totalSpriteMs = 0;
+			totalFrameMs = 0;
+		}
+	}
+#endif
+
+	const bool drawStatusOverlay =
+		(control[ConsolePlayer].buttonstate[bt_showstatusbar] ||
+		 control[ConsolePlayer].buttonheld[bt_showstatusbar]) &&
+		viewsize == 21;
+	if(drawStatusOverlay)
+	{
+#if defined(OF_ECWOLF_POSTWALL_GPU_ENABLED)
+		OF_WolfGPU_FallbackToCPU();
+#endif
 		ingame = false;
 		StatusBar->DrawStatusBar();
 		ingame = true;
@@ -1245,6 +1403,33 @@ void R_RenderView()
 ========================
 */
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+static bool OF_WolfClearFrameSpan(byte *frameBase, byte *dest, unsigned count,
+	byte color, unsigned pitch, unsigned height)
+{
+	if(count == 0)
+		return true;
+	if(OF_WolfGPU_ClearSpan(dest, (int)count, color))
+		return true;
+	if(frameBase == NULL || dest == NULL || pitch == 0 || height == 0)
+		return false;
+	if(pitch > OF_VIDEO_MAX_STRIDE || height > OF_VIDEO_MAX_HEIGHT)
+		return false;
+
+	const uintptr_t base = (uintptr_t)frameBase;
+	const uintptr_t target = (uintptr_t)dest;
+	const uint32_t frameBytes = pitch * height;
+	if(frameBytes == 0 || frameBytes > OF_VIDEO_MAX_FRAME_BYTES ||
+		target < base || target - base > frameBytes ||
+		count > frameBytes - (uint32_t)(target - base))
+	{
+		return false;
+	}
+
+	memset(dest, color, count);
+	return true;
+}
+#endif
 
 
 void    ThreeDRefresh (void)
@@ -1258,12 +1443,69 @@ void    ThreeDRefresh (void)
 //
 	map->ClearVisibility();
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	const unsigned screenWidth = (unsigned)SCREENWIDTH;
+	const unsigned screenHeight = (unsigned)SCREENHEIGHT;
+	const bool openfpgaFullRedraw =
+		(screenofs == 0 && (unsigned)viewwidth == screenWidth &&
+			(unsigned)viewheight == screenHeight) ||
+		(viewscreenx == 0 && (unsigned)viewwidth == screenWidth &&
+			(unsigned)viewheight == 200 && screenHeight >= 240);
+	if(openfpgaFullRedraw)
+	{
+		OF_WolfGPU_SetNextVideoFramePreserve(false);
+	}
+#endif
 	vbuf = VL_LockSurface();
 	if(vbuf == NULL) return;
-
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	byte *const openfpgaFrameBase = vbuf;
+#endif
 	vbuf += screenofs;
 	vbufPitch = SCREENPITCH;
 
+#if defined(OF_ECWOLF_WALL_GPU_ENABLED)
+	OF_WolfGPU_BeginFrame(vbuf, vbufPitch, viewheight);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	if(openfpgaFullRedraw && screenofs != 0 && viewscreenx == 0)
+	{
+		const byte black = GPalette.BlackIndex;
+		const unsigned topRows = (unsigned)viewscreeny;
+		const unsigned bottomStart = (unsigned)(viewscreeny + viewheight);
+		const uint32_t frameBytes =
+			(vbufPitch <= OF_VIDEO_MAX_STRIDE && screenHeight <= OF_VIDEO_MAX_HEIGHT) ?
+			vbufPitch * screenHeight : 0;
+		if(vbufPitch == 0 || vbufPitch > OF_VIDEO_MAX_STRIDE ||
+			screenHeight == 0 || screenHeight > OF_VIDEO_MAX_HEIGHT ||
+			frameBytes == 0 || frameBytes > OF_VIDEO_MAX_FRAME_BYTES)
+		{
+			printf("OpenFPGA GPU: skipped unsafe border clear pitch=%u height=%u.\n",
+				vbufPitch, screenHeight);
+		}
+		else
+		{
+			if(topRows != 0 &&
+				!OF_WolfClearFrameSpan(openfpgaFrameBase, openfpgaFrameBase,
+					topRows * vbufPitch, black, vbufPitch, screenHeight))
+			{
+				printf("OpenFPGA GPU: skipped unsafe top clear pitch=%u rows=%u height=%u.\n",
+					vbufPitch, topRows, screenHeight);
+			}
+			if(bottomStart < screenHeight)
+			{
+				byte *bottom = openfpgaFrameBase + bottomStart * vbufPitch;
+				const unsigned bottomRows = screenHeight - bottomStart;
+				if(!OF_WolfClearFrameSpan(openfpgaFrameBase, bottom,
+					bottomRows * vbufPitch, black, vbufPitch, screenHeight))
+				{
+					printf("OpenFPGA GPU: skipped unsafe bottom clear pitch=%u start=%u rows=%u height=%u.\n",
+						vbufPitch, bottomStart, bottomRows, screenHeight);
+				}
+			}
+		}
+	}
+#endif
+#endif
 	R_RenderView();
 
 	VL_UnlockSurface();
@@ -1280,6 +1522,7 @@ void    ThreeDRefresh (void)
 //
 	if (fizzlein)
 	{
+		OF_WolfGPU_FallbackToCPU();
 		while(!fizzlein->Update())
 			VH_UpdateScreen();
 		VH_UpdateScreen();
@@ -1290,6 +1533,7 @@ void    ThreeDRefresh (void)
 	}
 	else if (fpscounter)
 	{
+		OF_WolfGPU_FallbackToCPU();
 		FString fpsDisplay;
 		fpsDisplay.Format("%2u fps", fps);
 

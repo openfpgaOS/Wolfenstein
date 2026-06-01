@@ -868,7 +868,12 @@ bool IN_CheckAck (void)
 				// Wait until button has been released
 				do
 				{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+					IN_ProcessEvents();
+					SDL_Delay(5);
+#else
 					IN_WaitAndProcessEvents();
+#endif
 					buttons = IN_JoyButtons() << 4;
 
 					if(MousePresent)
@@ -893,7 +898,12 @@ void IN_Ack (AckType type)
 
 	do
 	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		IN_ProcessEvents();
+		SDL_Delay(5);
+#else
 		IN_WaitAndProcessEvents();
+#endif
 	}
 	while(!IN_CheckAck ());
 }

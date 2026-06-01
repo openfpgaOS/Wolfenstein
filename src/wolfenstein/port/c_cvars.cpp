@@ -174,7 +174,11 @@ void ReadConfig(void)
 	config.CreateSetting("ForceGrabMouse", false);
 	config.CreateSetting("MouseEnabled", 1);
 	config.CreateSetting("JoystickEnabled", true);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	config.CreateSetting("ViewSize", 21);
+#else
 	config.CreateSetting("ViewSize", 19);
+#endif
 	config.CreateSetting("MouseXAdjustment", 5);
 	config.CreateSetting("MouseYAdjustment", 5);
 	config.CreateSetting("PanXAdjustment", 5);
@@ -245,6 +249,10 @@ void ReadConfig(void)
 		controlScheme[i].mouse = config.GetSetting(mseSettingName)->GetInteger();
 	}
 	viewsize = config.GetSetting("ViewSize")->GetInteger();
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	viewsize = 21;
+	config.GetSetting("ViewSize")->SetValue(viewsize);
+#endif
 	mousexadjustment = config.GetSetting("MouseXAdjustment")->GetInteger();
 	mouseyadjustment = config.GetSetting("MouseYAdjustment")->GetInteger();
 	panxadjustment = config.GetSetting("PanXAdjustment")->GetInteger();

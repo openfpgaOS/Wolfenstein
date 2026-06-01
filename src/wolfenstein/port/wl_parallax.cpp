@@ -7,9 +7,22 @@
 #include "wl_play.h"
 #include "wl_main.h"
 #include "wl_draw.h"
+#include "of_ecwolf_gpu.h"
 
 extern fixed viewz;
 extern int viewshift;
+
+#if defined(OF_ECWOLF_GPU_SKY) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#define OF_ECWOLF_SKY_GPU_ENABLED 1
+#endif
+
+bool HasParallax(void)
+{
+	FTextureID skyid = levelInfo->Sky;
+	if(map->GetHeader().sky.isValid())
+		skyid = map->GetHeader().sky;
+	return skyid.isValid();
+}
 
 // Fill in a column of pixels. Could be potentially have a POT version but not
 // sure if it's worthwhile.
@@ -18,7 +31,23 @@ static void DrawParallaxPlaneLoop(byte *vbuf, unsigned vbufPitch,
 {
 	vbuf += y*vbufPitch;
 
-	for(fixed ty = (((y + yshift)) * yStep) % h; y < yend; vbuf += vbufPitch, ++y)
+	fixed ty = (((y + yshift)) * yStep) % h;
+#if defined(OF_ECWOLF_SKY_GPU_ENABLED)
+	if(OF_WolfGPU_IsActive())
+	{
+		const int count = yend - y;
+		const int sourceLen = h >> FRACBITS;
+		if(count > 0 && OF_WolfGPU_DrawRawColumn(vbuf, count, src,
+			sourceLen, ty, yStep))
+		{
+			return;
+		}
+		if(count > 0)
+			OF_WolfGPU_PrepareForCPUAccessColumn(vbuf, count, vbufPitch);
+	}
+#endif
+
+	for(; y < yend; vbuf += vbufPitch, ++y)
 	{
 		*vbuf = src[ty>>FRACBITS];
 
@@ -77,18 +106,21 @@ static void DrawParallaxPlane(byte *vbuf, unsigned vbufPitch,
 	}
 }
 
-void DrawParallax(byte *vbuf, unsigned vbufPitch)
-{
-	FTextureID skyid = levelInfo->Sky;
-	double scrollSpeed = levelInfo->SkyScrollSpeed;
-	int horizonOffset = levelInfo->SkyHorizonOffset;
+	void DrawParallax(byte *vbuf, unsigned vbufPitch)
+	{
+		if(!HasParallax())
+			return;
+
+		FTextureID skyid = levelInfo->Sky;
+		real64 scrollSpeed = static_cast<real64>(levelInfo->SkyScrollSpeed);
+		int horizonOffset = levelInfo->SkyHorizonOffset;
 
 	// Check if ROTT sky feature flags are set and use them if so
 	if(map->GetHeader().sky.isValid())
 	{
-		skyid = map->GetHeader().sky;
-		horizonOffset = map->GetHeader().skyHorizonOffset;
-		scrollSpeed = 0.0;
+			skyid = map->GetHeader().sky;
+			horizonOffset = map->GetHeader().skyHorizonOffset;
+			scrollSpeed = 0.0f;
 	}
 
 	if(!skyid.isValid())
@@ -125,8 +157,9 @@ void DrawParallax(byte *vbuf, unsigned vbufPitch)
 
 	skyhorizon -= horizonOffset;
 
-	// For a speed of 1 cycle roughly every 30 seconds (roughly in line with ZDoom)
-	const angle_t scroll = xs_ToInt(scrollSpeed*gamestate.TimeCount*(1<<27)/TICRATE);
+		// For a speed of 1 cycle roughly every 30 seconds (roughly in line with ZDoom)
+		const real64 scrollAmount = scrollSpeed * static_cast<real64>(gamestate.TimeCount) * static_cast<real64>(1 << 27) / static_cast<real64>(TICRATE);
+		const angle_t scroll = xs_ToInt(scrollAmount);
 	const int midangle = (players[ConsolePlayer].camera->angle + scroll)>>ANGLETOFINESHIFT;
 	// Position of world horizon line
 	const int horizonheight = (viewheight >> 1) - viewshift;

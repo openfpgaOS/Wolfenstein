@@ -12,30 +12,47 @@ missing-source fallback in this core.
 ## Runtime Data
 
 Runtime data lives in `Assets/wolfenstein/common/` after release assembly. The
-provided instances map the original CD images into APF data slots:
+provided instances reference the game's data files **directly** as APF data
+slots — there is no CUE/BIN disc image and no `/cd` ISO bridge. The eight ECWolf
+data files are extracted from the original media and dropped into `common/`:
 
-- `Wolf3D.json`: `Wolfenstein3D.cue` and `Wolfenstein3D.bin`
-- `Spear.json`: `Spear of Destiny (USA).cue` and `Spear of Destiny (USA).bin`
+- `Wolf3D.json`: `AUDIOHED.WL6` `AUDIOT.WL6` `GAMEMAPS.WL6` `MAPHEAD.WL6`
+  `VGADICT.WL6` `VGAGRAPH.WL6` `VGAHEAD.WL6` `VSWAP.WL6`
+- `Spear.json`: the same eight files with the `.SOD` extension
 
-The core no longer advertises or packages loose `AUDIOHED`, `GAMEMAPS`,
-`MAPHEAD`, `VSWAP`, or shareware instance folders. Slot 14 is the CUE sheet and
-slot 15 is the BIN image. The runtime tries to mount slot 14 first and falls
-back to slot 15 if the OS image only supports mounting the BIN directly.
-ECWolf also has a small `/cd` bridge for OpenFPGA builds: it indexes slot 15 as
-ISO9660 directly, including MODE1/2352 BIN sectors from CUE/BIN dumps, and
-serves the discovered files through ECWolf's normal file API.
-Wolfenstein 3-D and Spear of Destiny use their own AdLib/OPL music data from
-the game media. The default instances also map the SDK `bank.ofsf` SoundFont in
-slot 7, matching the SDK MIDI demo/test preload path, so the OS MIDI/SoundFont
-preload path is available when ECWolf or later
-ports need it.
-The core metadata keeps optional placeholder slots 3-6 before slot 7 because
-the current firmware datatable lookup expects low data-slot IDs to occupy
-matching datatable entries; removing those placeholders prevents `bank.ofsf`
-from being detected at boot.
-The OpenFPGA wrapper also derives ECWolf's data extension from the selected
-instance (`.wl6` for `Wolf3D.json`, `.sod` for `Spear.json`) so mixed CD images
-do not drop into ECWolf's text IWAD picker.
+Both games' files coexist in `common/`; selecting an instance binds only that
+game's files (so ECWolf sees exactly one IWAD). ECWolf's data search path is the
+virtual root (`$PROGDIR` = `/`), where the bound slots are visible via
+`opendir`/`readdir`, so the engine finds the files directly with no disc mount.
+
+Data-slot map (the firmware supports IDs up to 31; saves keep their fixed
+nonvolatile range 10-19, and slots 7/8 are the system Sound Bank / Shared
+Config, so the eight data files take 5, 6, 9 and 20-24):
+
+| Slot | Contents |
+|------|----------|
+| 1 | `os.bin` (OS binary) |
+| 2 | `wolf3d.ini` / `spear.ini` (OS config) |
+| 3 | `wolfenstein.elf` (application) |
+| 4 | `wolfmidi.zip` (MIDI music replacement pack) |
+| 5, 6 | `AUDIOHED`, `AUDIOT` |
+| 7 | `bank.ofsf` (MIDI SoundFont, preloaded by the SDK MIDI path) |
+| 8 | `ecwolf.cfg` (shared config, nonvolatile) |
+| 9 | `GAMEMAPS` |
+| 10-19 | `savegam0.ecs` … `savegam9.ecs` (nonvolatile saves) |
+| 20-24 | `MAPHEAD`, `VGADICT`, `VGAGRAPH`, `VGAHEAD`, `VSWAP` |
+
+Wolfenstein 3-D and Spear of Destiny use IMF/AdLib music in the original media,
+not Standard MIDI. The OpenFPGA build does not run the OPL emulator or convert
+IMF at runtime: place `wolfmidi.zip` in `common/` (slot 4) as the MIDI music
+replacement pack. If the pack is missing, or a song is not in it, music is
+disabled for that song. The wrapper derives ECWolf's data extension from
+whichever `VSWAP` variant the instance bound (`VSWAP.WL6` → `.wl6`,
+`VSWAP.SOD` → `.sod`).
+
+To regenerate the data files from a CUE/BIN dump: `bchunk` the BIN to an ISO,
+then extract `Install/data/WOLF3D/*.WL6` (Wolf3D CD) or the root `*.SOD` files
+(Spear CD) into `common/`.
 
 ECWolf also has its own engine support data (`IWADINFO`, actor definitions,
 map remap tables, strings, fonts, and related lumps). That data is not part of
@@ -44,13 +61,82 @@ application build, not exposed as another APF data slot. The Makefile packages
 `wadsrc/static/` into an internal `ecwolf.pk3` blob and the resource loader
 serves that in memory when ECWolf asks for `ecwolf.pk3`.
 
+## Rendering
+
+The default Pocket build uses a Wolfenstein-specific fast wall renderer, the
+OpenFPGA GPU for affine wall columns, and the SDK triple-buffer queue for
+presentation. SDLFB locks a hardware draw slot, renders into that slot, and
+presents it with `of_gpu_flip_to()` instead of copying a software buffer through
+`SDL_RenderPresent()`. Full-screen gameplay frames are treated as full redraws
+so the draw page does not have to be seeded from the previous frame; retained
+framebuffer behavior is still preserved for partial redraw paths such as menus.
+The OpenFPGA build defaults saved/loaded config to `ViewSize=21`, so gameplay
+uses this full-screen path instead of ECWolf's smaller viewport plus CPU status
+bar redraw.
+
+The fast wall renderer is the default for classic 64-unit ECWolf maps and
+compatible mods. It supports normal walls, doors, slide offsets, moving
+pushwalls, animated textures, and texture replacements that keep power-of-two
+column-major paletted wall data. If a map or texture cannot use that path the
+engine logs `OpenFPGA fast renderer: fallback (...)` and uses ECWolf's generic
+wall renderer instead. Classic solid floor/ceiling planes are filled as two GPU
+rect clears before walls, and sprite/weapon masked columns also use the GPU by
+default. Normal full-screen gameplay keeps that GPU work queued until the
+direct video-frame present, avoiding a CPU-visible framebuffer sync in the
+middle of the frame. Parallax sky and textured floor/ceiling spans also run on
+the GPU by default (`OF_ECWOLF_GPU_SKY` / `OF_ECWOLF_GPU_FLOORCEILING`); classic
+solid floors/ceilings already fill via GPU rect-clears regardless, and stock
+Wolf3D/Spear do not exercise the sky/textured-floor paths. The app uses a 320x240 APF framebuffer
+for direct triple buffering, with the 320x200 Wolfenstein gameplay viewport
+centered vertically inside it. The 320x240 scaler mode is marked 10:9 so the
+centered 320x200 viewport displays at the original 4:3 game aspect.
+
+GPU build flags:
+
+- `OF_ECWOLF_FAST_RENDERER`: use the Wolfenstein-specific fast wall raycaster (default)
+- `OF_ECWOLF_GPU_WALLS`: send wall columns through the GPU wrapper (default)
+- `OF_ECWOLF_GPU_SPRITES`: send sprite and weapon columns through the GPU wrapper (default)
+- `OF_ECWOLF_GPU_PRESENT`: present through SDK triple buffering (default)
+- `OF_ECWOLF_GPU_SKY`: send supported sky columns through the GPU wrapper (default)
+- `OF_ECWOLF_GPU_FLOORCEILING`: send floor/ceiling spans through the GPU wrapper (default)
+- `OF_ECWOLF_DIRECT_FRAMEBUFFER`: force the direct framebuffer path for profiling
+- `OF_ECWOLF_PROFILE_FRAME`: print average wall/sky/floor/sprite frame timings (debug only)
+- `OF_ECWOLF_GPU_NO_REGION_SYNC`: revert to the old per-fallback whole-frame GPU
+  drain/invalidate instead of region-scoped coherence (see below)
+
+### GPU/CPU coherence (region sync)
+
+The OpenFPGA GPU is an asynchronous span rasterizer: draw commands are staged
+and only run when kicked at present, GPU writes go straight to SDRAM bypassing
+the CPU cache, and `of_gpu_finish()` is a blocking fence wait. When a primitive
+cannot go on the GPU (an odd-sized sprite column, a non-power-of-two parallax
+sky column, ...) the renderer draws that column on the CPU into the same buffer.
+
+The fallback path uses region-scoped coherence modelled on the Doom OpenFPGA
+renderer (`../Doom/src/doom/cdoom/doom/r_gpu.c`): per-cache-line dirty/valid
+tracking in `of_ecwolf_gpu.cpp`, `OF_WolfGPU_PrepareForCPUAccessRect/Column`
+drains the GPU only when work is outstanding and invalidates only the touched
+lines, `gpu_prepare_for_gpu_write()` publishes pending CPU pixels before each GPU
+write so a 64-byte cache line is never both CPU-dirty and GPU-written, and the
+CPU writes are flushed in one coalesced pass at present. The GPU frame stays
+active across fallbacks. The old path turned every CPU fallback into a full
+`of_gpu_finish()` + whole-frame cache invalidate + frame teardown that also
+forced the rest of the frame onto the CPU and a whole-frame flush at present.
+Base Wolf3D/Spear content keeps all walls/floor/sprites/weapon on the GPU and
+never falls back, so it stays on the fully asynchronous present path.
+
+Build with `-DOF_ECWOLF_GPU_NO_REGION_SYNC` to revert to the old whole-frame
+behavior if a hardware regression is suspected, and use `OF_ECWOLF_PROFILE_FRAME`
+to compare per-stage frame timings. This path is compile-verified but has not
+yet been validated on hardware.
+
 ## Saves
 
 ECWolf uses `ecwolf.cfg` for settings and `savegamN.ecs` for saves. The core
 maps these into nonvolatile APF slots:
 
-- slot 20: `ecwolf.cfg`
-- slots 21-30: `savegam0.ecs` through `savegam9.ecs`
+- slot 8: `ecwolf.cfg`
+- slots 10-19: `savegam0.ecs` through `savegam9.ecs`
 
 `of_ecwolf_openfpga.c` registers those basenames with the openFPGA file service
 before `main()` and mounts the selected CUE/BIN disc image at

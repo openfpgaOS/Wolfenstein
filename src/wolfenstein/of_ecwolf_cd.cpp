@@ -15,7 +15,7 @@
 
 namespace
 {
-static const uint32_t BIN_SLOT = 15;
+static const uint32_t BIN_SLOT = 6;
 static const uint32_t ISO_SECTOR_SIZE = 2048;
 static const uint32_t MAX_CD_FILES = 512;
 static const uint32_t MAX_CD_NAME = 128;
@@ -301,7 +301,7 @@ static bool init_cd()
     }
     else
     {
-        printf("CD: slot 15 is not a supported ISO/BIN image.\n");
+        printf("CD: slot 6 is not a supported ISO/BIN image.\n");
         free(pvd);
         return false;
     }
@@ -312,7 +312,7 @@ static bool init_cd()
     parse_directory(root_lba, root_size, "", 0);
 
     cd_ready = cd_entry_count > 0;
-    printf("CD: indexed %lu file%s from slot 15 (%lu-byte sectors).\n",
+    printf("CD: indexed %lu file%s from slot 6 (%lu-byte sectors).\n",
            static_cast<unsigned long>(cd_entry_count),
            cd_entry_count == 1 ? "" : "s",
            static_cast<unsigned long>(cd_sector_size));

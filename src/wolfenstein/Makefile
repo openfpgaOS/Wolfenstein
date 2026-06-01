@@ -42,8 +42,14 @@ SDL_TARGET_SRC = $(wildcard $(SDK_DIR)/of_sdl2.c)
 OF_ECWOLF_SRC  = of_ecwolf_openfpga.c
 OF_ECWOLF_CD_SRC = of_ecwolf_cd.cpp
 OF_ECWOLF_CXXABI_SRC = of_ecwolf_cxxabi.cpp
+OF_ECWOLF_GPU_SRC = of_ecwolf_gpu.cpp
+OF_ECWOLF_FAST_RENDERER_SRC = of_ecwolf_fast_renderer.cpp
 ECWOLF_MIDI_SRC = $(SDK_DIR)/of_midi.c $(SDK_DIR)/of_smp_bank.c \
 	$(SDK_DIR)/of_smp_voice.c $(SDK_DIR)/of_smp_tables.c
+PC_EXTRA_CFLAGS += $(shell pkg-config --cflags SDL2_mixer 2>/dev/null)
+PC_EXTRA_CFLAGS += $(shell pkg-config --cflags SDL2_net 2>/dev/null)
+PC_EXTRA_LIBS += $(shell pkg-config --libs SDL2_mixer 2>/dev/null || echo -lSDL2_mixer)
+PC_EXTRA_LIBS += $(shell pkg-config --libs SDL2_net 2>/dev/null)
 
 CFLAGS   += -DOF_SDL2_EXTERNAL -DOF_ECWOLF_OPENFPGA -DBZ_NO_STDIO \
 	$(ECWOLF_INCLUDES) -I$(ZLIB_SRC_DIR) -I$(LZMA_SRC_DIR) -I$(BZIP2_SRC_DIR)
@@ -52,6 +58,12 @@ CFLAGS   += -Wno-old-style-definition -Wno-implicit-fallthrough \
 	-Wno-unused-but-set-variable
 CXXFLAGS += -DOF_SDL2_EXTERNAL -DOF_ECWOLF_OPENFPGA -DNO_GTK=1
 CXXFLAGS += -Dstricmp=strcasecmp -Dstrnicmp=strncasecmp
+CXXFLAGS += -DOF_ECWOLF_FAST_RENDERER -DOF_ECWOLF_GPU_WALLS \
+	-DOF_ECWOLF_GPU_SPRITES -DOF_ECWOLF_GPU_PRESENT \
+	-DOF_ECWOLF_GPU_FLOORCEILING -DOF_ECWOLF_GPU_SKY
+# TEMP diagnostic: per-stage frame timings ("Frame profile: ..." every 120 frames).
+# Remove this line once the GPU bottleneck is identified.
+CXXFLAGS += -DOF_ECWOLF_PROFILE_FRAME
 CXXFLAGS += -DBZ_NO_STDIO -Icxx_compat $(ECWOLF_INCLUDES) -I$(ZLIB_SRC_DIR) \
 	-I$(LZMA_SRC_DIR) -I$(BZIP2_SRC_DIR) -std=gnu++11 -fexceptions
 CXXFLAGS += -Wno-implicit-fallthrough -Wno-unused-parameter \
@@ -67,6 +79,7 @@ ECWOLF_C_SRCS = $(shell find $(ECWOLF_SRC_DIR) -type f -name '*.c' \
 ECWOLF_CXX_SRCS = $(shell find $(ECWOLF_SRC_DIR) -type f -name '*.cpp' \
 	! -path '*/android/*' ! -path '*/win32/*' ! -path '*/macosx/*' \
 	! -path '*/dosbox/*' ! -name 'wl_iwad_picker.cpp' \
+	! -path '*/mame/fmopl.cpp' \
 	! -path '*/resourcefiles/file_7z.cpp' \
 	! -path '*/textures/jpegtexture.cpp' | sort)
 ZLIB_SRCS = $(addprefix $(ZLIB_SRC_DIR)/, \
@@ -76,8 +89,12 @@ LZMA_SRCS = $(addprefix $(LZMA_SRC_DIR)/, CpuArch.c LzmaDec.c)
 BZIP2_SRCS = $(addprefix $(BZIP2_SRC_DIR)/, \
 	blocksort.c bzlib.c compress.c crctable.c decompress.c huffman.c randtable.c)
 
-SRCS     = $(ZLIB_SRCS) $(LZMA_SRCS) $(BZIP2_SRCS) $(ECWOLF_C_SRCS) $(SDL_TARGET_SRC) $(OF_ECWOLF_SRC) $(ECWOLF_MIDI_SRC) $(OF_EH_SRC)
-SRCS_CXX = $(ECWOLF_CXX_SRCS) $(OF_ECWOLF_CD_SRC) $(OF_ECWOLF_CXXABI_SRC) $(OF_CXXABI_SRC)
+SRCS     = $(ZLIB_SRCS) $(LZMA_SRCS) $(BZIP2_SRCS) $(ECWOLF_C_SRCS) $(OF_ECWOLF_SRC) $(ECWOLF_MIDI_SRC) $(OF_EH_SRC)
+SRCS_CXX = $(ECWOLF_CXX_SRCS) $(OF_ECWOLF_CD_SRC) $(OF_ECWOLF_CXXABI_SRC) $(OF_ECWOLF_GPU_SRC) $(OF_ECWOLF_FAST_RENDERER_SRC) $(OF_CXXABI_SRC)
+PC_SRCS = $(filter-out $(ECWOLF_MIDI_SRC),$(SRCS))
+PC_SRCS_CXX = $(filter-out $(OF_ECWOLF_CD_SRC) $(OF_ECWOLF_CXXABI_SRC) \
+	$(OF_ECWOLF_GPU_SRC) $(OF_ECWOLF_FAST_RENDERER_SRC) $(OF_CXXABI_SRC),$(SRCS_CXX))
+PC_CXXFLAGS = $(filter-out -Icxx_compat,$(CXXFLAGS))
 
 # Declare default target before sdk.mk's rules
 .DEFAULT_GOAL := all
@@ -123,7 +140,7 @@ release: $(OBJ_DIR)/app.elf
 	@cp $(RUNTIME)/bank.ofsf $$(ls -d $(OUT)/Assets/*/)/common/ 2>/dev/null || true
 	@common=$$(ls -d $(OUT)/Assets/*/)/common; \
 		$(STRIP) -o $$common/$(APP).elf $<
-	@for f in *.wl1 *.WL1 *.wl6 *.WL6 *.sod *.SOD *.sdm *.SDM *.sd2 *.SD2 *.sd3 *.SD3 *.n3d *.N3D *.pk3 *.PK3 *.ecwolf *.ECWOLF *.cue *.CUE *.bin *.BIN; do [ -f "$$f" ] && cp "$$f" $$(ls -d $(OUT)/Assets/*/)/common/; done 2>/dev/null; true
+	@for f in *.wl1 *.WL1 *.wl6 *.WL6 *.sod *.SOD *.sdm *.SDM *.sd2 *.SD2 *.sd3 *.SD3 *.n3d *.N3D *.pk3 *.PK3 *.ecwolf *.ECWOLF *.zip *.ZIP *.cue *.CUE *.bin *.BIN; do [ -f "$$f" ] && cp "$$f" $$(ls -d $(OUT)/Assets/*/)/common/; done 2>/dev/null; true
 	@echo "Ready: build/$(APP)/"
 
 COMMON = $(shell ls -d $(OUT)/Assets/*/common 2>/dev/null)

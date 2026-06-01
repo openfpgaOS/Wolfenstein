@@ -142,6 +142,13 @@ bool FGamemaps::Open(bool quiet)
 	NumLumps *= NUM_MAP_LUMPS;
 
 	Lumps = new FMapLump[NumLumps];
+	// The slot-backed FileReader must read map headers into a HEAP buffer: on
+	// the OpenFPGA target a Seek to a non-zero offset followed by a read into a
+	// stack buffer returns garbage (every working engine read targets the
+	// heap). The garbage previously corrupted Width/Height, yielding a
+	// multi-hundred-MB LumpSize and an out-of-memory abort in FillCache.
+	BYTE *header = new BYTE[PLANES*6+20];
+	int badMaps = 0;
 	for(unsigned int i = 0;i < NumLumps/NUM_MAP_LUMPS;++i)
 	{
 		// Map marker
@@ -159,9 +166,9 @@ bool FGamemaps::Open(bool quiet)
 		FMapLump &dataLump = Lumps[i*NUM_MAP_LUMPS+1];
 		dataLump.rlewTag = rlewTag;
 		dataLump.carmackCompressed = carmacked;
-		BYTE header[PLANES*6+20];
 		Reader->Seek(offsets[i], SEEK_SET);
-		Reader->Read(&header, PLANES*6+20);
+		memset(header, 0, PLANES*6+20);
+		long headerRead = Reader->Read(header, PLANES*6+20);
 
 		dataLump.Owner = this;
 		dataLump.LumpNameSetup("PLANES");
@@ -174,8 +181,31 @@ bool FGamemaps::Open(bool quiet)
 		dataLump.Header.Width = ReadLittleShort(&header[PLANES*6]);
 		dataLump.Header.Height = ReadLittleShort(&header[PLANES*6+2]);
 		memcpy(dataLump.Header.Name, &header[PLANES*6+4], 16);
-		dataLump.LumpSize += dataLump.Header.Width*dataLump.Header.Height*PLANES*2;
+
+		// Guard against a corrupt/short read producing an absurd allocation
+		// later in FillCache: if the dimensions are not sane, mark the lump
+		// empty (LumpSize 0) so FillCache skips it instead of allocating garbage.
+		if(headerRead != PLANES*6+20 ||
+			dataLump.Header.Width == 0 || dataLump.Header.Height == 0 ||
+			dataLump.Header.Width > 1024 || dataLump.Header.Height > 1024)
+		{
+			dataLump.LumpSize = 0;
+			++badMaps;
+		}
+		else
+			dataLump.LumpSize += dataLump.Header.Width*dataLump.Header.Height*PLANES*2;
 	}
+	{
+		static bool gamemapsLogged = false;
+		if(!gamemapsLogged)
+		{
+			gamemapsLogged = true;
+			Printf("gamemaps: readerLen=%ld mapheadLen=%ld maps=%u badMaps=%d\n",
+				(long)Reader->GetLength(), (long)mapheadReader->GetLength(),
+				NumLumps/NUM_MAP_LUMPS, badMaps);
+		}
+	}
+	delete[] header;
 	delete[] offsets;
 	if(!quiet) Printf(", %d lumps\n", NumLumps);
 	return true;

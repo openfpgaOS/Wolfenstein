@@ -104,7 +104,7 @@ void BlakeStatusBar::DrawLed(double percent, double x, double y) const
 
 	screen->VirtualToRealCoords(x, y, w, h, 320, 200, true, true);
 
-	int lightclip = xs_ToInt(y + h*(1-percent));
+	int lightclip = xs_ToInt(static_cast<real64>(y + h*(1-percent)));
 	screen->DrawTexture(dim, x, y,
 		DTA_DestWidthF, w,
 		DTA_DestHeightF, h,
@@ -134,7 +134,7 @@ void BlakeStatusBar::DrawStatusBar()
 	double stw = 320;
 	double sth = STATUSLINES;
 	screen->VirtualToRealCoords(stx, sty, stw, sth, 320, 200, true, true);
-	int boty = xs_ToInt(sty);
+	int boty = xs_ToInt(static_cast<real64>(sty));
 
 	screen->DrawTexture(TexMan(STBar), stx, sty,
 		DTA_DestWidthF, stw,
@@ -146,7 +146,7 @@ void BlakeStatusBar::DrawStatusBar()
 	stw = 320;
 	sth = STATUSTOPLINES;
 	screen->VirtualToRealCoords(stx, sty, stw, sth, 320, 200, true, true);
-	int topy = xs_ToInt(sth);
+	int topy = xs_ToInt(static_cast<real64>(sth));
 
 	screen->DrawTexture(TexMan(STBarTop), stx, 0.0,
 		DTA_DestWidthF, stw,

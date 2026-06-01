@@ -93,7 +93,7 @@ void ExpressionNode::Value::PerformOperation(const ExpressionNode::Value *other,
 		if(!isDouble)
 		{
 			isDouble = other->isDouble;
-			d = static_cast<double>(i);
+			d = static_cast<float>(i);
 		}
 
 		switch(op.token)
@@ -109,7 +109,7 @@ void ExpressionNode::Value::PerformOperation(const ExpressionNode::Value *other,
 				else
 				{
 					isDouble = true;
-					d = double(i)/other->GetInt();
+					d = float(i)/other->GetInt();
 				}
 				break;
 			case '%':

@@ -949,10 +949,28 @@ void GameMap::ReadPlanesData()
 
 	// Xlat loaded, see if we have a Mac format map.
 	char magic[6];
-	if(lumps[0]->Read(magic, 6) != 6 || strncmp(magic, "WDC3.1", 6) != 0)
+	int magicRead = lumps[0]->Read(magic, 6);
+	if(magicRead != 6 || strncmp(magic, "WDC3.1", 6) != 0)
 	{
-		ReadMacData();
-		return;
+		// On the OpenFPGA target the DOS gamemaps slot can fail to return data
+		// past a certain offset, so a map's decompressed cache is never built
+		// (no "WDC3.1" marker). That is NOT Mac-format data: the Mac reader
+		// requires a WALLLIST lump that DOS data does not provide, and
+		// W_GetNumForName would abort fatally on it. Only take the Mac path
+		// when a Mac map is actually present; otherwise report the bad map
+		// clearly (caught as a CDoomError at the top level) instead of hanging.
+		if(Wads.CheckNumForName("WALLLIST") != -1)
+		{
+			ReadMacData();
+			return;
+		}
+		printf("GameMap: %s has no valid plane data (read %d magic bytes %02x %02x %02x %02x %02x %02x, lump len %ld). "
+			"Map data is truncated or missing.\n",
+			map.GetChars(), magicRead,
+			(unsigned char)magic[0], (unsigned char)magic[1], (unsigned char)magic[2],
+			(unsigned char)magic[3], (unsigned char)magic[4], (unsigned char)magic[5],
+			lumps[0]->GetLength());
+		throw CRecoverableError("Map data is truncated or missing (see log).");
 	}
 
 	FileReader *lump = lumps[0];

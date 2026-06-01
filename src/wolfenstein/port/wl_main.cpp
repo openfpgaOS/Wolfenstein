@@ -418,29 +418,55 @@ static void InitGame()
 		ver = *SDL_Linked_Version();
 #endif
 		printf("SDL_Init: Using SDL %d.%d.%d\n", ver.major, ver.minor, ver.patch);
-	}
+		}
+
+#ifdef OF_ECWOLF_OPENFPGA
+	uint32_t startupStart = SDL_GetTicks();
+	uint32_t stepStart = startupStart;
+#endif
 
 #if SDL_VERSION_ATLEAST(2,0,0)
-	if(SDL_Init(0) < 0)
+		if(SDL_Init(0) < 0)
 #else
 	if(SDL_Init(SDL_INIT_VIDEO) < 0)
 #endif
-	{
-		I_FatalError("Unable to init SDL: %s", SDL_GetError());
-	}
+		{
+			I_FatalError("Unable to init SDL: %s", SDL_GetError());
+		}
+#ifdef OF_ECWOLF_OPENFPGA
+	printf("InitGame: SDL_Init took %lu ms.\n",
+		(unsigned long)(SDL_GetTicks() - stepStart));
+	stepStart = SDL_GetTicks();
+#endif
 
 	//
 	// Mapinfo
 	//
 
 	V_InitFontColors();
+#ifdef OF_ECWOLF_OPENFPGA
+	printf("InitGame: V_InitFontColors took %lu ms.\n",
+		(unsigned long)(SDL_GetTicks() - stepStart));
+	stepStart = SDL_GetTicks();
+#endif
 	G_ParseMapInfo(true);
+#ifdef OF_ECWOLF_OPENFPGA
+	printf("InitGame: G_ParseMapInfo(gameinfo) took %lu ms.\n",
+		(unsigned long)(SDL_GetTicks() - stepStart));
+	stepStart = SDL_GetTicks();
+#endif
 
 	//
 	// Init texture manager
 	//
 
 	TexMan.Init();
+#ifdef OF_ECWOLF_OPENFPGA
+	printf("InitGame: TexMan.Init took %lu ms.\n",
+		(unsigned long)(SDL_GetTicks() - stepStart));
+	printf("InitGame: pre-palette startup took %lu ms.\n",
+		(unsigned long)(SDL_GetTicks() - startupStart));
+#endif
 	printf("VL_ReadPalette: Setting up the Palette...\n");
 	VL_ReadPalette(gameinfo.GamePalette);
 	atterm(R_DeinitColormaps);
@@ -580,6 +606,10 @@ static void SetViewSize (unsigned int screenWidth, unsigned int screenHeight)
 	{
 		width = screenWidth;
 		height = screenHeight;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		if(screenWidth == 320 && screenHeight >= 240)
+			height = 200;
+#endif
 	}
 	else if(viewsize == 20)
 	{
@@ -597,17 +627,35 @@ static void SetViewSize (unsigned int screenWidth, unsigned int screenHeight)
 	viewheight = height&~1;
 	centerx = viewwidth/2-1;
 	centerxwide = AspectCorrection[r_ratio].isWide ? CorrectWidthFactor(centerx) : centerx;
-	if((unsigned) viewheight == screenHeight)
+	const bool fullScreenView = (unsigned)viewheight == screenHeight;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	const bool openfpgaLetterboxView =
+		screenWidth == 320 && screenHeight >= 240 &&
+		viewwidth == 320 && viewheight == 200;
+#endif
+	if(fullScreenView)
 		viewscreenx = viewscreeny = screenofs = 0;
 	else
 	{
 		viewscreenx = (screenWidth-viewwidth) / 2;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		if(openfpgaLetterboxView)
+			viewscreeny = (screenHeight-viewheight) / 2;
+		else
+#endif
 		viewscreeny = (statusbary2+statusbary1-viewheight)/2;
 		screenofs = viewscreeny*SCREENPITCH+viewscreenx;
 	}
 
 	int virtheight = screenHeight;
 	int virtwidth = screenWidth;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	if(screenWidth == 320 && screenHeight >= 240 && viewwidth == 320 &&
+		viewheight == 200)
+	{
+		virtheight = 200;
+	}
+#endif
 	if(AspectCorrection[r_ratio].isWide)
 		virtwidth = CorrectWidthFactor(virtwidth);
 	else

@@ -103,9 +103,9 @@ void VariableSymbol::FillValue(ExpressionNode::Value &val, AActor *self) const
 	if(GetType() == TypeHierarchy::staticTypes.GetType(TypeHierarchy::INT))
 		val = int64_t(*(int32_t*)((uint8_t*)self+offset));
 	else if(GetType() == TypeHierarchy::staticTypes.GetType(TypeHierarchy::ANGLE_T))
-		val = double((*(angle_t*)((uint8_t*)self+offset)) * 90.0 / ANGLE_90); // ANGLE_1 is not exact
+		val = static_cast<float>((*(angle_t*)((uint8_t*)self+offset)) * 90.0f / ANGLE_90); // ANGLE_1 is not exact
 	else
-		val = double(*(fixed*)((uint8_t*)self+offset))/FRACUNIT;
+		val = static_cast<float>(*(fixed*)((uint8_t*)self+offset)) / FRACUNIT;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

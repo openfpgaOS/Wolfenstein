@@ -2,11 +2,10 @@
  * of_smp_bank.c -- .ofsf runtime bank reader
  *
  * The kernel auto-loads the first .ofsf it finds in a data slot at boot
- * and hands the buffer to apps via OF_SVC->smp_bank_preload_base. Binding
- * copies metadata (header + presets + zones) into SDRAM so the CPU never
- * reads sample-pool memory during playback. Keep that copy lazy: ECWolf-class
- * apps may stage a bank for optional MIDI support while normal game startup
- * never uses the sample synth, and the metadata can be several megabytes.
+ * and hands the buffer to apps via OF_SVC->smp_bank_preload_base. This
+ * file copies the metadata (header + presets + zones) into SDRAM so the
+ * app can keep compact, writable metadata while sample data remains in
+ * the preloaded SDRAM bank read by the mixer.
  */
 
 #include "include/of_smp_bank.h"
@@ -72,6 +71,12 @@ int of_smp_bank_bind_preloaded(void)
     loaded_zones   = zone_copy;
     sample_base    = base + hdr->sample_data_offset;
     return 1;
+}
+
+__attribute__((constructor(102)))
+static void bank_autobind(void)
+{
+    (void)of_smp_bank_bind_preloaded();
 }
 
 const ofsf_header_t *of_smp_bank_get(void)

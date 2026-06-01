@@ -86,7 +86,7 @@ class CallArguments
 				union
 				{
 					int64_t	i;
-					double	d;
+					float	d;
 				}				val;
 				FString			str;
 				StateLabel		label;
@@ -139,7 +139,7 @@ typedef TArray<ActionInfo *> ActionTable;
 #define ACTION_PARAM_INT(name, num) \
 	int name = static_cast<int>(args[num].val.i)
 #define ACTION_PARAM_DOUBLE(name, num) \
-	double name = args[num].val.d
+	float name = args[num].val.d
 #define ACTION_PARAM_FIXED(name, num) \
 	fixed name = static_cast<fixed>(args[num].val.d*FRACUNIT)
 #define ACTION_PARAM_STRING(name, num) \
@@ -171,7 +171,7 @@ struct PropertyParam
 	{
 		ExpressionNode	*expr;
 		char			*s;
-		double			f;
+		float			f;
 		int64_t			i;
 	};
 };

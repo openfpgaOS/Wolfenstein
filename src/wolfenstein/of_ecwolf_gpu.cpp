@@ -1,0 +1,957 @@
+#include "of_ecwolf_gpu.h"
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "of_cache.h"
+#include "of_caps.h"
+#include "of_gpu.h"
+#include "of_video.h"
+#include "r_data/colormaps.h"
+#include "wl_def.h"
+
+static bool gpu_available;
+static bool gpu_initialized;
+static bool gpu_colormap_uploaded;
+static bool gpu_frame_active;
+static bool gpu_frame_dirty;
+static uint8_t *gpu_framebuffer;
+static int gpu_pitch;
+static int gpu_height;
+
+static bool gpu_video_initialized;
+static bool gpu_video_acquire_pending;
+static int gpu_video_draw_idx = -1;
+static int gpu_video_acquire_idx = -1;
+static uint32_t gpu_video_acquire_token;
+static uint8_t *gpu_video_draw_fb;
+static uint8_t *gpu_video_last_fb;
+static int gpu_video_pitch;
+static int gpu_video_height;
+static uint32_t gpu_video_frame_bytes;
+static bool gpu_video_next_frame_preserve = true;
+static bool gpu_video_clean_first_begin;
+static bool gpu_video_compat_logged;
+
+static of_gpu_affine_span_group_t gpu_batch;
+static int gpu_batch_count;
+static uint8_t gpu_batch_flags;
+static int gpu_batch_tex_width;
+static int gpu_batch_tex_w_mask;
+static int gpu_batch_tex_h_mask;
+static int gpu_batch_fb_step;
+
+/* Region-scoped CPU<->GPU coherence.
+ *
+ * The GPU is an asynchronous span rasterizer: draw commands are staged and the
+ * GPU only runs them when kicked (at present).  The expensive operations are a
+ * blocking of_gpu_finish() fence wait and whole-framebuffer cache flush/
+ * invalidate.  When a primitive cannot go on the GPU (an odd-sized sprite
+ * column, a non-power-of-two parallax sky column, ...) the renderer draws that
+ * one column on the CPU into the same buffer the GPU is filling.  Instead of
+ * draining the GPU and walking the entire frame for every such fallback (which
+ * also forced the rest of the frame onto the CPU), we drain only when GPU work
+ * is genuinely outstanding and sync only the cache lines the CPU touches,
+ * leaving the GPU frame active so later eligible primitives keep batching.
+ *
+ * This mirrors the Doom OpenFPGA renderer's proven flip-path model
+ * (../Doom/src/doom/cdoom/doom/r_gpu.c: gpu_cpu_dirty_lines / gpu_cpu_valid_lines
+ * / gpu_invalidate_rect_for_cpu / gpu_flush_cpu_dirty_lines).  Build with
+ * -DOF_ECWOLF_GPU_NO_REGION_SYNC to fall back to the old drain-and-end-frame
+ * behavior. */
+#if !defined(OF_ECWOLF_GPU_NO_REGION_SYNC)
+#define OF_ECWOLF_GPU_REGION_SYNC 1
+#else
+#define OF_ECWOLF_GPU_REGION_SYNC 0
+#endif
+
+#define GPU_FB_TRACK_LINE_BYTES 64u
+#define GPU_FB_TRACK_MAX_BYTES (512u * 1024u)
+#define GPU_FB_TRACK_MAX_LINES (GPU_FB_TRACK_MAX_BYTES / GPU_FB_TRACK_LINE_BYTES)
+#define GPU_FB_TRACK_WORDS ((GPU_FB_TRACK_MAX_LINES + 31u) / 32u)
+
+static uint8_t *gpu_track_base;
+static uint32_t gpu_track_bytes;
+static int gpu_track_pitch;
+static bool gpu_cpu_dirty;
+static uint32_t gpu_cpu_dirty_lines[GPU_FB_TRACK_WORDS];
+static uint32_t gpu_cpu_valid_lines[GPU_FB_TRACK_WORDS];
+
+static const int gpu_batch_max_lanes =
+	(int)OF_GPU_AFFINE_SPAN_GROUP_MAX_LANES;
+static const int gpu_source_cache_size = 512;
+
+struct GpuSourceCacheRange
+{
+	uintptr_t start;
+	uintptr_t end;
+};
+
+static GpuSourceCacheRange gpu_source_cache[gpu_source_cache_size];
+static unsigned int gpu_source_cache_next;
+static GpuSourceCacheRange gpu_source_cache_last;
+
+static bool gpu_is_power_of_two(int value)
+{
+	return value > 0 && (value & (value - 1)) == 0;
+}
+
+static void gpu_flush_batch()
+{
+	if(gpu_batch_count <= 0)
+		return;
+
+	gpu_batch.lane_count = (uint8_t)gpu_batch_count;
+	of_gpu_draw_affine_span_group(&gpu_batch);
+	gpu_batch_count = 0;
+	gpu_frame_dirty = true;
+}
+
+static void gpu_reset_batch()
+{
+	memset(&gpu_batch, 0, sizeof(gpu_batch));
+	gpu_batch_count = 0;
+	gpu_batch_flags = 0;
+	gpu_batch_tex_width = 0;
+	gpu_batch_tex_w_mask = 0;
+	gpu_batch_tex_h_mask = 0;
+	gpu_batch_fb_step = 0;
+}
+
+static void gpu_reset_source_cache()
+{
+	memset(gpu_source_cache, 0, sizeof(gpu_source_cache));
+	gpu_source_cache_next = 0;
+	gpu_source_cache_last.start = 0;
+	gpu_source_cache_last.end = 0;
+}
+
+static void gpu_make_source_visible(const uint8_t *source, uint32_t bytes)
+{
+	if(source == NULL || bytes == 0)
+		return;
+
+	uintptr_t start = (uintptr_t)source;
+	uintptr_t end = start + bytes;
+	if(end < start)
+		return;
+
+	uintptr_t aligned_start = start & ~(uintptr_t)(OF_GPU_CACHE_LINE_BYTES - 1);
+	uintptr_t aligned_end = (end + OF_GPU_CACHE_LINE_BYTES - 1) &
+		~(uintptr_t)(OF_GPU_CACHE_LINE_BYTES - 1);
+
+	if(aligned_start >= gpu_source_cache_last.start &&
+		aligned_end <= gpu_source_cache_last.end)
+	{
+		return;
+	}
+
+	for(int i = 0;i < gpu_source_cache_size;i++)
+	{
+		if(aligned_start >= gpu_source_cache[i].start &&
+			aligned_end <= gpu_source_cache[i].end)
+		{
+			gpu_source_cache_last = gpu_source_cache[i];
+			return;
+		}
+	}
+
+	of_cache_flush_range((void *)source, bytes);
+
+	GpuSourceCacheRange &slot =
+		gpu_source_cache[gpu_source_cache_next++ % gpu_source_cache_size];
+	slot.start = aligned_start;
+	slot.end = aligned_end;
+	gpu_source_cache_last = slot;
+}
+
+static void gpu_line_set(uint32_t *bits, unsigned int line)
+{
+	bits[line >> 5] |= 1u << (line & 31u);
+}
+
+static bool gpu_line_test(const uint32_t *bits, unsigned int line)
+{
+	return (bits[line >> 5] & (1u << (line & 31u))) != 0;
+}
+
+static void gpu_clear_line_bits(uint32_t *bits)
+{
+	memset(bits, 0, sizeof(gpu_cpu_dirty_lines));
+}
+
+static void gpu_reset_cpu_cache_tracking(void)
+{
+	gpu_clear_line_bits(gpu_cpu_dirty_lines);
+	gpu_clear_line_bits(gpu_cpu_valid_lines);
+	gpu_cpu_dirty = false;
+}
+
+static unsigned int gpu_track_line_count(void)
+{
+	uint32_t lines = (gpu_track_bytes + GPU_FB_TRACK_LINE_BYTES - 1u) /
+		GPU_FB_TRACK_LINE_BYTES;
+	return lines > GPU_FB_TRACK_MAX_LINES ? GPU_FB_TRACK_MAX_LINES :
+		(unsigned int)lines;
+}
+
+static void gpu_flush_line_run(unsigned int first, unsigned int last)
+{
+	if(gpu_track_base == NULL || first > last)
+		return;
+
+	uint32_t start = first * GPU_FB_TRACK_LINE_BYTES;
+	uint32_t size = (last - first + 1u) * GPU_FB_TRACK_LINE_BYTES;
+	if(start >= gpu_track_bytes)
+		return;
+	if(start + size > gpu_track_bytes)
+		size = gpu_track_bytes - start;
+	of_cache_flush_range(gpu_track_base + start, size);
+}
+
+static void gpu_inval_line_run(unsigned int first, unsigned int last)
+{
+	if(gpu_track_base == NULL || first > last)
+		return;
+
+	uint32_t start = first * GPU_FB_TRACK_LINE_BYTES;
+	uint32_t size = (last - first + 1u) * GPU_FB_TRACK_LINE_BYTES;
+	if(start >= gpu_track_bytes)
+		return;
+	if(start + size > gpu_track_bytes)
+		size = gpu_track_bytes - start;
+	of_cache_inval_range(gpu_track_base + start, size);
+}
+
+/* Write back (publish to SDRAM) only the cache lines the CPU has dirtied this
+ * frame, coalescing contiguous runs.  Called before the page flip so CPU
+ * overlay pixels land in the buffer the display controller scans out. */
+static void gpu_flush_cpu_dirty_lines(void)
+{
+	if(!gpu_cpu_dirty || gpu_track_base == NULL)
+		return;
+
+	unsigned int count = gpu_track_line_count();
+	unsigned int line = 0;
+	while(line < count)
+	{
+		while(line < count && !gpu_line_test(gpu_cpu_dirty_lines, line))
+			line++;
+		if(line >= count)
+			break;
+
+		unsigned int first = line;
+		while(line < count && gpu_line_test(gpu_cpu_dirty_lines, line))
+			line++;
+
+		gpu_flush_line_run(first, line - 1u);
+	}
+
+	gpu_clear_line_bits(gpu_cpu_dirty_lines);
+	gpu_cpu_dirty = false;
+}
+
+/* Drop stale CPU cache lines covering a region so the CPU reads GPU-produced
+ * pixels.  Skips lines already CPU-dirty (so pending CPU writes are not lost)
+ * or already invalidated this frame, and marks the freshly invalidated lines
+ * valid.  Caller must have ensured the GPU has finished writing the region. */
+static void gpu_invalidate_rect_for_cpu(const uint8_t *dest, int w, int h,
+	int pitch)
+{
+	if(gpu_track_base == NULL || dest == NULL || w <= 0 || h <= 0 ||
+		(const uint8_t *)dest < gpu_track_base)
+	{
+		return;
+	}
+
+	uintptr_t base_off = (uintptr_t)dest - (uintptr_t)gpu_track_base;
+	unsigned int count = gpu_track_line_count();
+
+	for(int row = 0; row < h; row++)
+	{
+		uintptr_t off = base_off + (uintptr_t)row * (uintptr_t)pitch;
+		if(off >= gpu_track_bytes)
+			break;
+		uintptr_t endoff = off + (uintptr_t)w - 1u;
+		if(endoff >= gpu_track_bytes)
+			endoff = gpu_track_bytes - 1u;
+
+		unsigned int first = (unsigned int)(off / GPU_FB_TRACK_LINE_BYTES);
+		unsigned int last = (unsigned int)(endoff / GPU_FB_TRACK_LINE_BYTES);
+		if(last >= count)
+			last = count - 1u;
+
+		unsigned int line = first;
+		while(line <= last)
+		{
+			while(line <= last &&
+				(gpu_line_test(gpu_cpu_dirty_lines, line) ||
+				 gpu_line_test(gpu_cpu_valid_lines, line)))
+			{
+				line++;
+			}
+			if(line > last)
+				break;
+
+			unsigned int run_first = line;
+			while(line <= last &&
+				!gpu_line_test(gpu_cpu_dirty_lines, line) &&
+				!gpu_line_test(gpu_cpu_valid_lines, line))
+			{
+				gpu_line_set(gpu_cpu_valid_lines, line);
+				line++;
+			}
+
+			gpu_inval_line_run(run_first, line - 1u);
+		}
+	}
+}
+
+/* Mark the cache lines covering a region as CPU-dirty (and valid) so they are
+ * written back at present. */
+static void gpu_mark_cpu_dirty_rect(const uint8_t *dest, int w, int h, int pitch)
+{
+	if(gpu_track_base == NULL || dest == NULL || w <= 0 || h <= 0 ||
+		(const uint8_t *)dest < gpu_track_base)
+	{
+		return;
+	}
+
+	uintptr_t base_off = (uintptr_t)dest - (uintptr_t)gpu_track_base;
+	unsigned int count = gpu_track_line_count();
+
+	for(int row = 0; row < h; row++)
+	{
+		uintptr_t off = base_off + (uintptr_t)row * (uintptr_t)pitch;
+		if(off >= gpu_track_bytes)
+			break;
+		uintptr_t endoff = off + (uintptr_t)w - 1u;
+		if(endoff >= gpu_track_bytes)
+			endoff = gpu_track_bytes - 1u;
+
+		unsigned int first = (unsigned int)(off / GPU_FB_TRACK_LINE_BYTES);
+		unsigned int last = (unsigned int)(endoff / GPU_FB_TRACK_LINE_BYTES);
+		if(last >= count)
+			last = count - 1u;
+
+		for(unsigned int line = first; line <= last; line++)
+		{
+			gpu_line_set(gpu_cpu_dirty_lines, line);
+			gpu_line_set(gpu_cpu_valid_lines, line);
+		}
+	}
+
+	gpu_cpu_dirty = true;
+}
+
+/* Call immediately before the GPU writes the tracked framebuffer.  Publishes
+ * any pending CPU-overlay pixels to SDRAM and drops them from the cache so the
+ * GPU write lands on clean memory the CPU no longer holds a dirty copy of; the
+ * present-time writeback can then never clobber GPU output.  Clearing the valid
+ * bits forces a later CPU access on those lines to re-invalidate against the
+ * GPU-produced pixels.  Mirrors Doom gpu_prepare_for_gpu_write (r_gpu.c:716-740);
+ * no-op unless a CPU fallback dirtied lines this frame. */
+static void gpu_prepare_for_gpu_write(void)
+{
+	if(!gpu_cpu_dirty || gpu_track_base == NULL)
+		return;
+
+	gpu_flush_cpu_dirty_lines();
+	gpu_clear_line_bits(gpu_cpu_valid_lines);
+}
+
+static bool gpu_can_batch(uint8_t flags, int tex_width, int tex_w_mask,
+	int tex_h_mask, int fb_step)
+{
+	if(gpu_batch_count <= 0)
+		return true;
+
+	return gpu_batch_flags == flags &&
+		gpu_batch_tex_width == tex_width &&
+		gpu_batch_tex_w_mask == tex_w_mask &&
+		gpu_batch_tex_h_mask == tex_h_mask &&
+		gpu_batch_fb_step == fb_step;
+}
+
+static bool gpu_add_affine(uint8_t *dest, int count, const uint8_t *source,
+	int source_len, int tex_width, int tex_w_mask, int tex_h_mask,
+	int sfrac, int tfrac, int sstep, int tstep, int light, int fb_step,
+	uint8_t flags)
+{
+	if(!gpu_available || !gpu_frame_active)
+		return false;
+	if(dest == NULL || source == NULL || count <= 0 || count > 4095)
+		return false;
+	if(light < 0 || light >= NUMCOLORMAPS)
+		return false;
+	if(!gpu_is_power_of_two(tex_width) ||
+		!gpu_is_power_of_two(tex_w_mask + 1) ||
+		!gpu_is_power_of_two(tex_h_mask + 1))
+	{
+		return false;
+	}
+
+	gpu_prepare_for_gpu_write();
+
+	if(!gpu_can_batch(flags, tex_width, tex_w_mask, tex_h_mask, fb_step))
+		gpu_flush_batch();
+
+	if(gpu_batch_count == 0)
+	{
+		memset(&gpu_batch, 0, sizeof(gpu_batch));
+		gpu_batch.flags = flags;
+		gpu_batch.tex_width = (uint16_t)tex_width;
+		gpu_batch.tex_w_mask = (uint16_t)tex_w_mask;
+		gpu_batch.tex_h_mask = (uint16_t)tex_h_mask;
+		gpu_batch.fb_step = fb_step;
+		gpu_batch_flags = flags;
+		gpu_batch_tex_width = tex_width;
+		gpu_batch_tex_w_mask = tex_w_mask;
+		gpu_batch_tex_h_mask = tex_h_mask;
+		gpu_batch_fb_step = fb_step;
+	}
+
+	if(gpu_batch_count >= gpu_batch_max_lanes)
+		gpu_flush_batch();
+
+	gpu_make_source_visible(source, (uint32_t)source_len);
+
+	unsigned lane = (unsigned)gpu_batch_count++;
+	gpu_batch.fb_addr[lane] = (uint32_t)(uintptr_t)dest;
+	gpu_batch.tex_addr[lane] = (uint32_t)(uintptr_t)source;
+	gpu_batch.count[lane] = (uint16_t)count;
+	gpu_batch.s[lane] = sfrac;
+	gpu_batch.t[lane] = tfrac;
+	gpu_batch.sstep[lane] = sstep;
+	gpu_batch.tstep[lane] = tstep;
+	gpu_batch.light[lane] = (uint8_t)light;
+	gpu_batch.colormap_id[lane] = 0;
+
+	if(gpu_batch_count >= gpu_batch_max_lanes)
+		gpu_flush_batch();
+
+	return true;
+}
+
+void OF_WolfGPU_Init(void)
+{
+	if(!gpu_initialized)
+	{
+		gpu_initialized = true;
+
+		if(getenv("OF_ECWOLF_NOGPU") != NULL)
+			return;
+
+		const struct of_capabilities *caps = of_get_caps();
+		if(caps == NULL || caps->gpu_base == 0 ||
+			(caps->hw_features & OF_HW_GPU_SPAN) == 0)
+		{
+			return;
+		}
+
+		of_gpu_init();
+		of_cache_flush();
+		gpu_available = true;
+		gpu_reset_source_cache();
+		printf("OpenFPGA GPU: hardware command path enabled.\n");
+	}
+
+	if(!gpu_available || gpu_colormap_uploaded || NormalLight.Maps == NULL)
+		return;
+
+	of_gpu_palookup_upload(0, NormalLight.Maps, NUMCOLORMAPS * 256);
+	GPU_TEX_FLUSH = 1;
+
+	gpu_colormap_uploaded = true;
+	gpu_reset_source_cache();
+	printf("OpenFPGA GPU: Wolfenstein renderer acceleration enabled.\n");
+}
+
+void OF_WolfGPU_Shutdown(void)
+{
+	if(!gpu_available)
+		return;
+
+	OF_WolfGPU_EndFrame();
+	OF_WolfGPU_ResetVideoFrames();
+	of_gpu_shutdown();
+	gpu_available = false;
+	gpu_initialized = false;
+	gpu_colormap_uploaded = false;
+	gpu_reset_source_cache();
+}
+
+void OF_WolfGPU_ResetVideoFrames(void)
+{
+	gpu_video_initialized = false;
+	gpu_video_acquire_pending = false;
+	gpu_video_draw_idx = -1;
+	gpu_video_acquire_idx = -1;
+	gpu_video_acquire_token = 0;
+	gpu_video_draw_fb = NULL;
+	gpu_video_last_fb = NULL;
+	gpu_video_pitch = 0;
+	gpu_video_height = 0;
+	gpu_video_frame_bytes = 0;
+	gpu_video_clean_first_begin = false;
+	gpu_track_base = NULL;
+	gpu_track_bytes = 0;
+	gpu_track_pitch = 0;
+	gpu_reset_cpu_cache_tracking();
+}
+
+bool OF_WolfGPU_CanUseVideoFrames(int width, int height)
+{
+	OF_WolfGPU_Init();
+	if(!gpu_available || width <= 0 || height <= 0)
+		return false;
+
+	of_video_mode_t mode;
+	of_video_get_mode(&mode);
+
+	/* The app renders into a width x height 8-bit framebuffer and presents it
+	 * through the GPU page flip; that needs the ACTIVE hardware video mode to
+	 * match exactly. The app forces its surface to 320x240 (c_cvars.cpp) but
+	 * never sets the hardware mode -- it relies on the boot-default scaler,
+	 * which an openfpgaOS resync can change. On a mismatch SDLFB falls back to
+	 * a per-frame CPU software-scaling present (GPfx.Convert), which is slow
+	 * for EVERYTHING including menus. So actively set the mode we need (once)
+	 * before giving up. */
+	if(mode.width != (uint16_t)width || mode.height != (uint16_t)height ||
+		mode.color_mode != OF_VIDEO_MODE_8BIT)
+	{
+		static bool tried_set_mode = false;
+		if(!tried_set_mode)
+		{
+			tried_set_mode = true;
+			of_video_mode_t want;
+			memset(&want, 0, sizeof(want));
+			want.width = (uint16_t)width;
+			want.height = (uint16_t)height;
+			want.stride = 0;
+			want.color_mode = OF_VIDEO_MODE_8BIT;
+			of_video_set_mode(&want);
+			of_video_get_mode(&mode);
+			printf("OpenFPGA GPU: set video mode %dx%d 8bit -> got %ux%u color=%u.\n",
+				width, height, (unsigned)mode.width, (unsigned)mode.height,
+				(unsigned)mode.color_mode);
+		}
+	}
+
+	if(mode.width != (uint16_t)width || mode.height != (uint16_t)height)
+	{
+		if(!gpu_video_compat_logged)
+		{
+			printf("OpenFPGA GPU: direct present unavailable, app=%dx%d video=%ux%u.\n",
+				width, height, (unsigned)mode.width, (unsigned)mode.height);
+			gpu_video_compat_logged = true;
+		}
+		return false;
+	}
+	if(mode.color_mode != OF_VIDEO_MODE_8BIT)
+	{
+		if(!gpu_video_compat_logged)
+		{
+			printf("OpenFPGA GPU: direct present unavailable, video color mode=%u.\n",
+				(unsigned)mode.color_mode);
+			gpu_video_compat_logged = true;
+		}
+		return false;
+	}
+
+	return true;
+}
+
+void OF_WolfGPU_SetNextVideoFramePreserve(bool preserve)
+{
+	gpu_video_next_frame_preserve = preserve;
+}
+
+static bool gpu_acquire_video_draw_buffer(int width, int height)
+{
+	if(gpu_video_draw_idx >= 0 && gpu_video_draw_fb != NULL)
+		return true;
+
+	const bool preserve = gpu_video_next_frame_preserve;
+	gpu_video_next_frame_preserve = true;
+
+	int draw_idx;
+	if(!gpu_video_initialized)
+	{
+		draw_idx = of_video_acquire_next(-1, 0);
+		gpu_video_initialized = true;
+	}
+	else if(gpu_video_acquire_pending)
+	{
+		draw_idx = of_video_acquire_next(gpu_video_acquire_idx,
+			gpu_video_acquire_token);
+		gpu_video_acquire_pending = false;
+		gpu_video_acquire_idx = -1;
+		gpu_video_acquire_token = 0;
+	}
+	else
+	{
+		draw_idx = of_video_acquire_next(-1, 0);
+	}
+
+	if(draw_idx < 0)
+	{
+		OF_WolfGPU_ResetVideoFrames();
+		return false;
+	}
+
+	uint8_t *draw_fb = of_video_buffer_addr(draw_idx);
+	if(draw_fb == NULL)
+	{
+		OF_WolfGPU_ResetVideoFrames();
+		return false;
+	}
+
+	of_video_mode_t mode;
+	of_video_get_mode(&mode);
+	int pitch = mode.stride ? (int)mode.stride : (int)mode.width;
+	if(mode.width != (uint16_t)width || mode.height != (uint16_t)height ||
+		mode.color_mode != OF_VIDEO_MODE_8BIT || pitch <= 0)
+	{
+		OF_WolfGPU_ResetVideoFrames();
+		return false;
+	}
+
+	uint32_t frame_bytes = (uint32_t)pitch * (uint32_t)height;
+	if(preserve && gpu_video_last_fb != NULL && gpu_video_last_fb != draw_fb)
+		memcpy(draw_fb, gpu_video_last_fb, frame_bytes);
+	else if(preserve && gpu_video_last_fb == NULL)
+		memset(draw_fb, 0, frame_bytes);
+
+	gpu_video_draw_idx = draw_idx;
+	gpu_video_draw_fb = draw_fb;
+	gpu_video_pitch = pitch;
+	gpu_video_height = height;
+	gpu_video_frame_bytes = frame_bytes;
+	gpu_video_clean_first_begin = !preserve;
+	return true;
+}
+
+bool OF_WolfGPU_AcquireVideoFrame(uint8_t **framebuffer, int *pitch,
+	int width, int height)
+{
+	if(framebuffer != NULL)
+		*framebuffer = NULL;
+	if(pitch != NULL)
+		*pitch = 0;
+
+	if(!OF_WolfGPU_CanUseVideoFrames(width, height))
+		return false;
+	if(!gpu_acquire_video_draw_buffer(width, height))
+		return false;
+
+	if(framebuffer != NULL)
+		*framebuffer = gpu_video_draw_fb;
+	if(pitch != NULL)
+		*pitch = gpu_video_pitch;
+	return true;
+}
+
+bool OF_WolfGPU_PresentVideoFrame(void)
+{
+	if(!gpu_available || gpu_video_draw_idx < 0 ||
+		gpu_video_draw_fb == NULL || gpu_video_frame_bytes == 0)
+	{
+		return false;
+	}
+
+	const bool gpu_active = gpu_frame_active;
+	if(gpu_active)
+	{
+		gpu_flush_batch();
+		/* Publish CPU overlay writes (sprite/weapon/sky fallbacks) to SDRAM
+		 * before the flip.  The GPU only runs queued draws on the kick below,
+		 * so writing back the CPU-dirty lines first is race-free; drain first
+		 * only if GPU work was queued after the last CPU sync (and might have
+		 * been auto-flushed mid-frame).  Pure-GPU frames have no dirty lines
+		 * and stay fully asynchronous. */
+		if(gpu_cpu_dirty)
+		{
+			if(gpu_frame_dirty)
+				of_gpu_finish();
+			gpu_flush_cpu_dirty_lines();
+		}
+		gpu_frame_active = false;
+		gpu_frame_dirty = false;
+		gpu_framebuffer = NULL;
+		gpu_pitch = 0;
+		gpu_height = 0;
+		gpu_reset_batch();
+		gpu_reset_cpu_cache_tracking();
+	}
+	else
+	{
+		of_cache_flush_range(gpu_video_draw_fb, gpu_video_frame_bytes);
+	}
+
+	uint32_t token = of_gpu_flip_to(gpu_video_draw_idx);
+	of_gpu_kick();
+
+	gpu_video_last_fb = gpu_video_draw_fb;
+	gpu_video_acquire_pending = true;
+	gpu_video_acquire_idx = gpu_video_draw_idx;
+	gpu_video_acquire_token = token;
+	gpu_video_draw_idx = -1;
+	gpu_video_draw_fb = NULL;
+	gpu_video_clean_first_begin = false;
+	return true;
+}
+
+void OF_WolfGPU_BeginFrame(uint8_t *framebuffer, int pitch, int height)
+{
+	OF_WolfGPU_Init();
+
+	if(!gpu_available || !gpu_colormap_uploaded || framebuffer == NULL ||
+		pitch <= 0 || height <= 0)
+	{
+		return;
+	}
+
+	OF_WolfGPU_EndFrame();
+
+	gpu_framebuffer = framebuffer;
+	gpu_pitch = pitch;
+	gpu_height = height;
+	gpu_frame_dirty = false;
+	gpu_frame_active = true;
+	gpu_reset_batch();
+
+	/* Enable per-line CPU/GPU coherence tracking when rendering into a video
+	 * draw buffer that fits the tracking budget; otherwise PrepareForCPUAccess
+	 * falls back to a whole-frame sync.  Track against the full buffer base so
+	 * view columns, the weapon and border writes all map to valid offsets. */
+	if(gpu_video_draw_fb != NULL && gpu_video_frame_bytes > 0 &&
+		gpu_video_frame_bytes <= GPU_FB_TRACK_MAX_BYTES &&
+		((uintptr_t)gpu_video_draw_fb & (GPU_FB_TRACK_LINE_BYTES - 1u)) == 0 &&
+		framebuffer >= gpu_video_draw_fb &&
+		(uintptr_t)framebuffer + (uintptr_t)height * (uintptr_t)pitch <=
+			(uintptr_t)gpu_video_draw_fb + gpu_video_frame_bytes)
+	{
+		gpu_track_base = gpu_video_draw_fb;
+		gpu_track_bytes = gpu_video_frame_bytes;
+		gpu_track_pitch = pitch;
+	}
+	else
+	{
+		gpu_track_base = NULL;
+		gpu_track_bytes = 0;
+		gpu_track_pitch = 0;
+	}
+	gpu_reset_cpu_cache_tracking();
+
+	uint32_t bytes = (uint32_t)((height - 1) * pitch + pitch);
+	/* A freshly acquired non-preserve buffer has no pending CPU writes (its
+	 * previous use flushed them at present), so this whole-view flush is
+	 * redundant.  The old extra `framebuffer == gpu_video_draw_fb` guard never
+	 * matched the centered 320x200-in-320x240 viewport, so it flushed ~64KB
+	 * every gameplay frame.  Preserve frames still flush (clean_first_begin is
+	 * only set for non-preserve acquires). */
+	if(gpu_video_clean_first_begin)
+	{
+		gpu_video_clean_first_begin = false;
+	}
+	else
+	{
+		of_cache_flush_range(framebuffer, bytes);
+	}
+	of_gpu_set_framebuffer((uint32_t)(uintptr_t)framebuffer, (uint16_t)pitch);
+}
+
+void OF_WolfGPU_EndFrame(void)
+{
+	if(!gpu_available || !gpu_frame_active)
+		return;
+
+	gpu_flush_batch();
+	const bool had_gpu_work = gpu_frame_dirty;
+	if(had_gpu_work)
+	{
+		of_gpu_finish();
+		gpu_frame_dirty = false;
+	}
+	/* Write back any CPU overlay lines already tracked this frame before the
+	 * invalidate drops the cache, so a full-CPU takeover after a region sync
+	 * does not lose those pixels.  No-op when nothing was CPU-dirtied. */
+	gpu_flush_cpu_dirty_lines();
+	if(had_gpu_work)
+	{
+		/* Invalidate the same region the dirty-line writeback covers (the full
+		 * tracked buffer when tracking is active), so flush and invalidate stay
+		 * consistent and a takeover after a region sync reads GPU pixels. */
+		if(gpu_track_base != NULL && gpu_track_bytes > 0)
+		{
+			of_cache_inval_range(gpu_track_base, gpu_track_bytes);
+		}
+		else if(gpu_framebuffer != NULL && gpu_pitch > 0 && gpu_height > 0)
+		{
+			uint32_t bytes = (uint32_t)((gpu_height - 1) * gpu_pitch + gpu_pitch);
+			of_cache_inval_range(gpu_framebuffer, bytes);
+		}
+	}
+	gpu_reset_cpu_cache_tracking();
+
+	gpu_frame_active = false;
+	gpu_frame_dirty = false;
+	gpu_framebuffer = NULL;
+	gpu_pitch = 0;
+	gpu_height = 0;
+	gpu_reset_batch();
+}
+
+void OF_WolfGPU_FallbackToCPU(void)
+{
+	OF_WolfGPU_EndFrame();
+}
+
+void OF_WolfGPU_PrepareForCPUAccessRect(uint8_t *dest, int width, int height,
+	int pitch)
+{
+	if(!gpu_available || !gpu_frame_active)
+		return;
+
+#if !OF_ECWOLF_GPU_REGION_SYNC
+	(void)dest;
+	(void)width;
+	(void)height;
+	(void)pitch;
+	OF_WolfGPU_EndFrame();
+#else
+	if(width <= 0 || height <= 0 || pitch <= 0)
+		return;
+
+	gpu_flush_batch();
+
+	/* Fall back to a whole-frame sync (end the GPU frame) when fine-grained
+	 * tracking is unavailable or the rect lies outside the tracked buffer:
+	 * non-video-frame buffer, mismatched pitch, a frame larger than the
+	 * tracking budget, or a dest below/after the tracked range. */
+	const uint8_t *rect_end = dest +
+		(uintptr_t)(height - 1) * (uintptr_t)pitch + (uintptr_t)width;
+	if(gpu_track_base == NULL || pitch != gpu_track_pitch ||
+		dest < gpu_track_base ||
+		rect_end > gpu_track_base + gpu_track_bytes)
+	{
+		OF_WolfGPU_EndFrame();
+		return;
+	}
+
+	/* Drain the GPU only when it has outstanding writes, so the CPU reads the
+	 * pixels the GPU produced.  Later CPU columns in the same stage do not
+	 * re-drain unless new GPU work was queued in between. */
+	if(gpu_frame_dirty)
+	{
+		of_gpu_finish();
+		gpu_frame_dirty = false;
+	}
+
+	gpu_invalidate_rect_for_cpu(dest, width, height, pitch);
+	gpu_mark_cpu_dirty_rect(dest, width, height, pitch);
+#endif
+}
+
+void OF_WolfGPU_PrepareForCPUAccessColumn(uint8_t *dest, int count, int pitch)
+{
+	OF_WolfGPU_PrepareForCPUAccessRect(dest, 1, count, pitch);
+}
+
+bool OF_WolfGPU_IsActive(void)
+{
+	return gpu_available && gpu_frame_active;
+}
+
+bool OF_WolfGPU_DrawColumn(uint8_t *dest, int count, const uint8_t *source,
+	int source_len, int texfrac, int texstep, int light)
+{
+	if(!gpu_is_power_of_two(source_len) || source_len > 256)
+		return false;
+
+	return gpu_add_affine(dest, count, source, source_len,
+		1, 0, source_len - 1,
+		0, texfrac, 0, texstep, light, gpu_pitch, OF_GPU_SPAN_COLORMAP);
+}
+
+bool OF_WolfGPU_DrawMaskedColumn(uint8_t *dest, int count,
+	const uint8_t *source, int source_len, int texfrac, int texstep,
+	int light)
+{
+	if(!gpu_is_power_of_two(source_len) || source_len > 256)
+		return false;
+
+	return gpu_add_affine(dest, count, source, source_len,
+		1, 0, source_len - 1,
+		0, texfrac, 0, texstep, light, gpu_pitch,
+		OF_GPU_SPAN_COLORMAP | OF_GPU_SPAN_SKIP_ZERO);
+}
+
+bool OF_WolfGPU_DrawRawColumn(uint8_t *dest, int count,
+	const uint8_t *source, int source_len, int texfrac, int texstep)
+{
+	if(!gpu_is_power_of_two(source_len) || source_len > 1024)
+		return false;
+
+	return gpu_add_affine(dest, count, source, source_len,
+		1, 0, source_len - 1,
+		0, texfrac, 0, texstep, 0, gpu_pitch, 0);
+}
+
+void OF_WolfGPU_PreloadSource(const uint8_t *source, uint32_t bytes)
+{
+	if(!gpu_available || source == NULL || bytes == 0)
+		return;
+	gpu_make_source_visible(source, bytes);
+}
+
+bool OF_WolfGPU_DrawSpan(uint8_t *dest, int count, const uint8_t *source,
+	int tex_width, int tex_height, int sfrac, int tfrac,
+	int sstep, int tstep, int light)
+{
+	if(!gpu_is_power_of_two(tex_width) || !gpu_is_power_of_two(tex_height))
+		return false;
+
+	return gpu_add_affine(dest, count, source, tex_width * tex_height,
+		tex_width, tex_width - 1, tex_height - 1,
+		sfrac, tfrac, sstep, tstep, light, 1, OF_GPU_SPAN_COLORMAP);
+}
+
+bool OF_WolfGPU_ClearSpan(uint8_t *dest, int count, uint8_t color)
+{
+	if(!gpu_available || !gpu_frame_active)
+		return false;
+	if(dest == NULL || count <= 0 || count > 65535)
+		return false;
+
+	gpu_prepare_for_gpu_write();
+	gpu_flush_batch();
+	of_gpu_clear_rect_strided((uint32_t)(uintptr_t)dest, (uint16_t)count,
+		1, (uint16_t)gpu_pitch, color);
+	gpu_frame_dirty = true;
+	return true;
+}
+
+bool OF_WolfGPU_ClearRect(uint8_t *dest, int width, int height, uint8_t color)
+{
+	if(!gpu_available || !gpu_frame_active)
+		return false;
+	if(dest == NULL || width <= 0 || height <= 0 ||
+		width > 65535 || height > 65535)
+	{
+		return false;
+	}
+
+	gpu_prepare_for_gpu_write();
+	gpu_flush_batch();
+	of_gpu_clear_rect_strided((uint32_t)(uintptr_t)dest, (uint16_t)width,
+		(uint16_t)height, (uint16_t)gpu_pitch, color);
+	gpu_frame_dirty = true;
+	return true;
+}
+
+#endif

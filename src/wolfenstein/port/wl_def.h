@@ -18,6 +18,59 @@
 #endif
 #include <SDL.h>
 
+// --- OpenFPGA SDL scancode compatibility -----------------------------------
+// The openfpgaOS SDL2 shim (src/sdk/include/SDL2/SDL.h) is a SUBSET and omits
+// several desktop-only scancodes that upstream ECWolf references. Do NOT add
+// them back to the SDK header: an OS resync overwrites any SDK change. Define
+// them here in the port (after <SDL.h>, so the shim's enum is already complete)
+// so every port translation unit builds regardless of the shim. None of these
+// keys exist on the Analogue Pocket:
+//   * the conversion-table keys (c_cvars.cpp) map to UNKNOWN -- they never occur.
+//   * AC_BACK is used in an equality test (id_in.cpp), so it needs a UNIQUE
+//     value that cannot collide with a real key. Use its standard SDL2 value
+//     270 (unused by the shim, < SDL_NUM_SCANCODES). The Pocket never produces
+//     it, so that test simply never fires.
+#if SDL_VERSION_ATLEAST(2,0,0)
+#ifndef SDL_SCANCODE_CLEAR
+#define SDL_SCANCODE_CLEAR        SDL_SCANCODE_UNKNOWN
+#endif
+#ifndef SDL_SCANCODE_MODE
+#define SDL_SCANCODE_MODE         SDL_SCANCODE_UNKNOWN
+#endif
+#ifndef SDL_SCANCODE_APPLICATION
+#define SDL_SCANCODE_APPLICATION  SDL_SCANCODE_UNKNOWN
+#endif
+#ifndef SDL_SCANCODE_HELP
+#define SDL_SCANCODE_HELP         SDL_SCANCODE_UNKNOWN
+#endif
+#ifndef SDL_SCANCODE_SYSREQ
+#define SDL_SCANCODE_SYSREQ       SDL_SCANCODE_UNKNOWN
+#endif
+#ifndef SDL_SCANCODE_POWER
+#define SDL_SCANCODE_POWER        SDL_SCANCODE_UNKNOWN
+#endif
+#ifndef SDL_SCANCODE_UNDO
+#define SDL_SCANCODE_UNDO         SDL_SCANCODE_UNKNOWN
+#endif
+#ifndef SDL_SCANCODE_AC_BACK
+#define SDL_SCANCODE_AC_BACK      ((SDL_Scancode)270)
+#endif
+// Video symbols the shim also drops. Only reached on the SDL renderer path
+// (sdlvideo.cpp, UsingRenderer) which the Pocket does not use; map to symbols
+// the shim does provide so it compiles. These guards no-op if a full SDL.h is
+// restored (there they are macros, so #ifndef is false).
+#ifndef SDL_WINDOWPOS_UNDEFINED_DISPLAY
+#define SDL_WINDOWPOS_UNDEFINED_DISPLAY(X) SDL_WINDOWPOS_UNDEFINED
+#endif
+#ifndef SDL_PIXELFORMAT_ARGB2101010
+#define SDL_PIXELFORMAT_ARGB2101010 SDL_PIXELFORMAT_ARGB8888
+#endif
+#ifndef SDL_PIXELFORMAT_ARGB1555
+#define SDL_PIXELFORMAT_ARGB1555 SDL_PIXELFORMAT_ARGB8888
+#endif
+#endif // SDL_VERSION_ATLEAST(2,0,0)
+// ---------------------------------------------------------------------------
+
 #if !defined O_BINARY
 #	define O_BINARY 0
 #endif
@@ -69,14 +122,23 @@ void I_FatalError(const char *errorStr, ...);
 void Quit();
 void NetDPrintf(const char *format, ...);
 
+#ifdef OF_ECWOLF_OPENFPGA
+#define FIXED2FLOAT(fixed) ((float)(fixed)*(1.0f/65536.0f))
+#define FLOAT2FIXED(x) (fixed_t((x)*FRACUNIT))
+#else
 #define FIXED2FLOAT(fixed) ((double)(fixed)/65536.0)
 #define FLOAT2FIXED(x) (fixed_t((x)*FRACUNIT))
+#endif
 
 #ifdef _WIN32
 #define stricmp _stricmp
 #endif
 
+#ifdef OF_ECWOLF_OPENFPGA
+typedef float real64;
+#else
 typedef double real64;
+#endif
 typedef SDWORD int32;
 #include "xs_Float.h"
 
@@ -135,6 +197,7 @@ static inline uint32_t TICS2MS(uint32_t tics) { return tics * 100 / 7; }
 #undef M_PI
 #define PI              3.141592657
 #define M_PI PI
+#define PI_F            3.141592657f
 
 #define GLOBAL1         (1l<<16)
 #define TILEGLOBAL      GLOBAL1

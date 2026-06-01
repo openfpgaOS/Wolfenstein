@@ -237,12 +237,12 @@ static int SymbolCompare(const void *s1, const void *s2)
 
 void ExprSin(AActor *self, ExpressionNode::Value &out, ExpressionNode* const *args, FRandom *rng)
 {
-	out = double(finesine[(args[0]->Evaluate(self).GetInt()%360)*FINEANGLES/360])/FRACUNIT;
+	out = float(finesine[(args[0]->Evaluate(self).GetInt()%360)*FINEANGLES/360])/FRACUNIT;
 }
 
 void ExprCos(AActor *self, ExpressionNode::Value &out, ExpressionNode* const *args, FRandom *rng)
 {
-	out = double(finecosine[(args[0]->Evaluate(self).GetInt()%360)*FINEANGLES/360])/FRACUNIT;
+	out = float(finecosine[(args[0]->Evaluate(self).GetInt()%360)*FINEANGLES/360])/FRACUNIT;
 }
 
 void ExprRandom(AActor *self, ExpressionNode::Value &out, ExpressionNode* const *args, FRandom *rng)
@@ -259,9 +259,9 @@ void ExprFRandom(AActor *self, ExpressionNode::Value &out, ExpressionNode* const
 {
 	static const unsigned int randomPrecision = 0x80000000;
 
-	double min = args[0]->Evaluate(self).GetDouble();
-	double max = args[1]->Evaluate(self).GetDouble();
-	out = min+(double((*rng)(randomPrecision))/randomPrecision)*(max-min);
+	float min = args[0]->Evaluate(self).GetDouble();
+	float max = args[1]->Evaluate(self).GetDouble();
+	out = min+(float((*rng)(randomPrecision))/randomPrecision)*(max-min);
 }
 
 static const struct ExpressionFunction

@@ -83,6 +83,9 @@ FTexture *MacShapeTexture_TryCreate(FileReader &, int lumpnum);
 FTexture *PictTexture_TryCreate(FileReader &, int lumpnum);
 FTexture *WolfRawTexture_TryCreate(FileReader &, int lumpnum);
 FTexture *WolfShapeTexture_TryCreate(FileReader &, int lumpnum);
+#ifdef OF_ECWOLF_OPENFPGA
+FTexture *WolfShapeTexture_CreateTrusted(FileReader &, int lumpnum);
+#endif
 
 
 // Examines the lump contents to decide what type of texture to create,
@@ -116,6 +119,26 @@ FTexture * FTexture::CreateTexture (int lumpnum, int usetype)
 	FWadLump data = Wads.OpenLumpNum (lumpnum);
 	if(Wads.GetLumpNamespace(lumpnum) == ns_flats)
 		usetype = TEX_Flat;
+
+#ifdef OF_ECWOLF_OPENFPGA
+	const char *wadName = Wads.GetWadName(Wads.GetLumpFile(lumpnum));
+	bool isWolfVSwap = wadName != NULL && strncasecmp(wadName, "VSWAP.", 6) == 0;
+	if(isWolfVSwap && usetype == TEX_Sprite && Wads.GetLumpNamespace(lumpnum) == ns_sprites)
+	{
+		FTexture *tex = WolfShapeTexture_CreateTrusted(data, lumpnum);
+		tex->UseType = usetype;
+		return tex;
+	}
+	else if(isWolfVSwap && usetype == TEX_Flat && Wads.GetLumpNamespace(lumpnum) == ns_flats)
+	{
+		FTexture *tex = FlatTexture_TryCreate(data, lumpnum);
+		if(tex != NULL)
+		{
+			tex->UseType = usetype;
+			return tex;
+		}
+	}
+#endif
 
 	for(size_t i = 0; i < countof(CreateInfo); i++)
 	{

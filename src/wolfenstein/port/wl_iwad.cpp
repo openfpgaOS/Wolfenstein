@@ -350,13 +350,55 @@ static void LookForGameData(FResourceFile *res, TArray<WadStuff> &iwads, const c
 	TArray<BaseFile> foundFiles;
 
 	File dir(directory);
-	if(!dir.exists())
-		return;
 
-	if(!VerifySpearInstall(directory))
-		dir = File(directory); // Repopulate the file list
+	TArray<FString> files;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// APF data slots resolve via fopen-by-name, but the OS neither lists them
+	// through readdir nor stats the virtual root as a directory, so
+	// dir.exists()/getFileList() are useless here (and the dir.exists() guard
+	// below would bail out). Probe the known base-game filenames directly,
+	// using the same path string the loader will use, so IWAD auto-detection
+	// works with loose data files and no mounted disc image. Only the extension
+	// the active instance actually bound will open.
+	{
+		static const char* const ProbeNames[] = {
+			"audiohed", "audiot", "gamemaps", "maphead",
+			"vgadict", "vgahead", "vgagraph", "vswap"
+		};
+		static const char* const ProbeExts[] = {
+			"wl6", "wl1", "wl3", "sod", "sd1", "sd2", "sd3", "sdm", "n3d"
+		};
+		for(unsigned int n = 0;n < sizeof(ProbeNames)/sizeof(ProbeNames[0]);++n)
+		{
+			for(unsigned int e = 0;e < sizeof(ProbeExts)/sizeof(ProbeExts[0]);++e)
+			{
+				FString fname;
+				fname.Format("%s.%s", ProbeNames[n], ProbeExts[e]);
+				FString probePath;
+				probePath.Format("%s" PATH_SEPARATOR "%s", directory, fname.GetChars());
+				if(FILE *probe = fopen(probePath.GetChars(), "rb"))
+				{
+					fclose(probe);
+					files.Push(fname);
+				}
+			}
+		}
+		printf("OpenFPGA: IWAD probe found %u base file(s) in '%s'.\n",
+			files.Size(), directory);
+	}
+#endif
 
-	TArray<FString> files = dir.getFileList();
+	if(files.Size() == 0)
+	{
+		if(!dir.exists())
+			return;
+
+		if(!VerifySpearInstall(directory))
+			dir = File(directory); // Repopulate the file list
+
+		files = dir.getFileList();
+	}
+
 	for(unsigned int i = 0;i < files.Size();++i)
 	{
 		FString name, extension;
@@ -631,7 +673,10 @@ void SelectGame(TArray<FString> &wadfiles, const char* iwad, const char* datawad
 	{
 		FString configDir = FileSys::GetDirectoryPath(FileSys::DIR_Configuration);
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-		dataPaths = "/cd;.;$PROGDIR";
+		// Game data files are bound to APF data slots and resolved by name in
+		// the virtual root ($PROGDIR); no /cd disc image is mounted. A single
+		// path avoids detecting the same loose IWAD twice.
+		dataPaths = "$PROGDIR";
 #else
 		dataPaths = ".;$PROGDIR";
 

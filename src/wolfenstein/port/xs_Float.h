@@ -37,6 +37,11 @@
 #define finline __forceinline
 #endif
 
+#ifdef OF_ECWOLF_OPENFPGA
+#undef _xs_DEFAULT_CONVERSION
+#define _xs_DEFAULT_CONVERSION 1
+#endif
+
 union _xs_doubleints
 {
 	real64 val;
@@ -51,9 +56,15 @@ union _xs_doubleints
 // ====================================================================================================================
 //  Constants
 // ====================================================================================================================
+#ifdef OF_ECWOLF_OPENFPGA
+const real64 _xs_doublemagic			= 0.0f;
+const real64 _xs_doublemagicdelta      	= 0.0f;
+const real64 _xs_doublemagicroundeps	= 0.5f;
+#else
 const real64 _xs_doublemagic			= real64 (6755399441055744.0); 	    //2^52 * 1.5,  uses limited precisicion to floor
 const real64 _xs_doublemagicdelta      	= (1.5e-8);                         //almost .5f = .5f + 1e^(number of exp bit)
 const real64 _xs_doublemagicroundeps	= (.5f-_xs_doublemagicdelta);       //almost .5f = .5f - 1e^(number of exp bit)
+#endif
 
 
 // ====================================================================================================================
@@ -123,7 +134,11 @@ finline static int32 xs_CRoundToInt(real64 val, real64 dmr)
 	uval.val = val + dmr;
 	return uval.ival[_xs_iman_];
 #else
+#ifdef OF_ECWOLF_OPENFPGA
+    return int32(floorf(val+.5f));
+#else
     return int32(floor(val+.5));
+#endif
 #endif
 }
 
@@ -161,7 +176,11 @@ finline static int32 xs_FloorToInt(real64 val, real64 dme)
 #if _xs_DEFAULT_CONVERSION==0
     return xs_CRoundToInt (val - dme);
 #else
+#ifdef OF_ECWOLF_OPENFPGA
+    return floorf(val);
+#else
     return floor(val);
+#endif
 #endif
 }
 
@@ -172,7 +191,11 @@ finline static int32 xs_CeilToInt(real64 val, real64 dme)
 #if _xs_DEFAULT_CONVERSION==0
     return xs_CRoundToInt (val + dme);
 #else
+#ifdef OF_ECWOLF_OPENFPGA
+    return ceilf(val);
+#else
     return ceil(val);
+#endif
 #endif
 }
 
@@ -186,7 +209,11 @@ finline static int32 xs_RoundToInt(real64 val)
 	// you'll end up with Banker's Rounding again.
     return xs_CRoundToInt (val + _xs_doublemagicdelta);
 #else
+#ifdef OF_ECWOLF_OPENFPGA
+    return floorf(val+.5f);
+#else
     return floor(val+.5);
+#endif
 #endif
 }
 

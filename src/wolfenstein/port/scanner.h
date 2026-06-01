@@ -89,7 +89,7 @@ class Scanner
 		{
 			SCString		str;
 			int				number;
-			double			decimal;
+			float			decimal;
 			bool			boolean;
 			char			token;
 			unsigned int	tokenLine;

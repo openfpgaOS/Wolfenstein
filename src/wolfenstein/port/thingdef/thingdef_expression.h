@@ -51,16 +51,16 @@ class ExpressionNode
 			public:
 				void PerformOperation(const Value *other, const ExpressionOperator &op);
 
-				const Value &operator=(int64_t val) { i = val; d = static_cast<double> (val); isDouble = false; return *this; }
-				const Value &operator=(double val) { i = static_cast<int64_t>(val); d = val; isDouble = true; return *this; }
+				const Value &operator=(int64_t val) { i = val; d = static_cast<float> (val); isDouble = false; return *this; }
+				const Value &operator=(float val) { i = static_cast<int64_t>(val); d = val; isDouble = true; return *this; }
 
 				int64_t GetInt() const { return isDouble ? static_cast<int64_t>(d) : i; }
-				double GetDouble() const { return isDouble ? d : static_cast<double>(i); }
+				float GetDouble() const { return isDouble ? d : static_cast<float>(i); }
 
 			private:
 				bool isDouble;
 				int64_t	i;
-				double	d;
+				float	d;
 		};
 
 		~ExpressionNode();

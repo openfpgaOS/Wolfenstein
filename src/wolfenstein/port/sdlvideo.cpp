@@ -12,12 +12,20 @@
 //#include "stats.h"
 #include "v_palette.h"
 #include "sdlvideo.h"
+#include "of_ecwolf_gpu.h"
 //#include "r_swrenderer.h"
 #include "thingdef/thingdef.h"
 #include "wl_main.h"
 #include "version.h"
 
 #include <SDL.h>
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#define OF_ECWOLF_DIRECT_VIDEO 1
+#include "of_video.h"
+#else
+#define OF_ECWOLF_DIRECT_VIDEO 0
+#endif
 
 IVideo *Video = NULL;
 
@@ -212,6 +220,7 @@ void IVideo::DumpAdapters ()
 
 void I_ShutdownGraphics ()
 {
+	OF_WolfGPU_Shutdown();
 	if (screen)
 	{
 		DFrameBuffer *s = screen;
@@ -222,7 +231,9 @@ void I_ShutdownGraphics ()
 	if (Video)
 		delete Video, Video = NULL;
 
+#if !OF_ECWOLF_DIRECT_VIDEO
 	SDL_QuitSubSystem (SDL_INIT_VIDEO);
+#endif
 }
 
 void I_InitGraphics ()
@@ -230,11 +241,16 @@ void I_InitGraphics ()
 	if(Video)
 		return;
 
+#if OF_ECWOLF_DIRECT_VIDEO
+	of_video_init();
+	of_video_set_display_mode(OF_DISPLAY_FRAMEBUFFER);
+#else
 	if (SDL_InitSubSystem (SDL_INIT_VIDEO) < 0)
 	{
 		I_FatalError ("Could not initialize SDL video:\n%s\n", SDL_GetError());
 		return;
 	}
+#endif
 
 #ifdef __ANDROID__
 	extern void Android_InitGraphics();
@@ -312,6 +328,9 @@ private:
 	bool NeedPalUpdate;
 	bool NeedGammaUpdate;
 	bool NotPaletted;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	bool DirectFramebuffer;
+#endif
 
 	void UpdateColors ();
 	void ResetSDLRenderer ();
@@ -578,9 +597,12 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer (int width, int height, bool fullscree
 		if (fb->Width == width &&
 			fb->Height == height)
 		{
+#if OF_ECWOLF_DIRECT_VIDEO
+			return old;
+#else
 #if SDL_VERSION_ATLEAST(2,0,0)
 			bool fsnow = (SDL_GetWindowFlags (fb->Screen) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
-	
+
 			if (fsnow != fullscreen)
 			{
 				fb->SetFullscreen (fullscreen);
@@ -597,11 +619,14 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer (int width, int height, bool fullscree
 					return old;
 			}
 #endif
+#endif
 		}
 
+#if !OF_ECWOLF_DIRECT_VIDEO
 #if SDL_VERSION_ATLEAST(2,0,0)
 		oldwin = fb->Screen;
 		fb->Screen = NULL;
+#endif
 #endif
 
 		old->GetFlash (flashColor, flashAmount);
@@ -686,12 +711,30 @@ SDLFB::SDLFB (int width, int height, bool fullscreen)
 	NeedGammaUpdate = false;
 	UpdatePending = false;
 	NotPaletted = false;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	DirectFramebuffer = false;
+#endif
 	FlashAmount = 0;
 
 #if SDL_VERSION_ATLEAST(2,0,0)
 	Renderer = NULL;
 	Texture = NULL;
 
+#if OF_ECWOLF_DIRECT_VIDEO
+	(void)fullscreen;
+	(void)oldwin;
+	Screen = NULL;
+	UsingRenderer = false;
+	DirectFramebuffer = true;
+	NotPaletted = false;
+	Pitch = Width;
+	if (!OF_WolfGPU_CanUseVideoFrames(width, height))
+	{
+		I_FatalError("OpenFPGA direct GPU video is unavailable for %dx%d.",
+			width, height);
+		return;
+	}
+#else
 	if (oldwin)
 	{
 		// In some cases (Mac OS X fullscreen) SDL2 doesn't like having multiple windows which
@@ -721,6 +764,7 @@ SDLFB::SDLFB (int width, int height, bool fullscreen)
 #ifdef __ANDROID__
 	extern void PostSDLCreateRenderer(SDL_Window *);
 	PostSDLCreateRenderer(Screen);
+#endif
 #endif
 
 	for (i = 0; i < 256; i++)
@@ -768,6 +812,10 @@ SDLFB::SDLFB (int width, int height, bool fullscreen)
 SDLFB::~SDLFB ()
 {
 #if SDL_VERSION_ATLEAST(2,0,0)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_WolfGPU_ResetVideoFrames();
+#endif
+#if !OF_ECWOLF_DIRECT_VIDEO
 	if (Renderer)
 	{
 		if (Texture)
@@ -780,25 +828,57 @@ SDLFB::~SDLFB ()
 		SDL_DestroyWindow (Screen);
 	}
 #endif
+#endif
 }
 
 bool SDLFB::IsValid ()
 {
+#if OF_ECWOLF_DIRECT_VIDEO
+	return DFrameBuffer::IsValid() && DirectFramebuffer;
+#else
 	return DFrameBuffer::IsValid() && Screen != NULL;
+#endif
 }
 
 int SDLFB::GetPageCount ()
 {
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	if (DirectFramebuffer)
+		return 3;
+#endif
 	return 1;
 }
 
 bool SDLFB::Lock (bool buffered)
 {
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	if (DirectFramebuffer)
+	{
+		if (LockCount == 0)
+		{
+			BYTE *pixels;
+			int pitch;
+			if (!OF_WolfGPU_AcquireVideoFrame(&pixels, &pitch, Width, Height))
+			{
+				I_FatalError("OpenFPGA direct GPU framebuffer acquire failed.");
+				return false;
+			}
+			Buffer = (BYTE *)pixels;
+			Pitch = pitch;
+		}
+		LockCount++;
+		return false;
+	}
+#endif
 	return DSimpleCanvas::Lock ();
 }
 
 bool SDLFB::Relock ()
 {
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	if (DirectFramebuffer)
+		return Lock (true);
+#endif
 	return DSimpleCanvas::Lock ();
 }
 
@@ -858,6 +938,19 @@ void SDLFB::Update ()
 	LockCount = 0;
 	UpdatePending = false;
 
+#if OF_ECWOLF_DIRECT_VIDEO
+	if (DirectFramebuffer)
+	{
+		if (!OF_WolfGPU_PresentVideoFrame())
+		{
+			I_FatalError("OpenFPGA direct GPU framebuffer present failed.");
+		}
+		return;
+	}
+	I_FatalError("OpenFPGA direct GPU video path disabled unexpectedly.");
+	return;
+#else
+
 	//BlitCycles.Reset();
 	//SDLFlipCycles.Reset();
 	//BlitCycles.Clock();
@@ -905,6 +998,9 @@ void SDLFB::Update ()
 		SDL_UnlockTexture (Texture);
 
 		//SDLFlipCycles.Clock();
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		SDL_RenderPresent(Renderer);
+#else
 		SDL_RenderClear(Renderer);
 		SDL_RenderCopy(Renderer, Texture, NULL, NULL);
 
@@ -915,6 +1011,7 @@ void SDLFB::Update ()
 #endif
 
 		SDL_RenderPresent(Renderer);
+#endif
 		//SDLFlipCycles.Unclock();
 	}
 	else
@@ -967,10 +1064,36 @@ void SDLFB::Update ()
 #endif
 
 	//BlitCycles.Unclock();
+#endif
 }
 
 void SDLFB::UpdateColors ()
 {
+#if OF_ECWOLF_DIRECT_VIDEO
+	PalEntry palette[256];
+	uint32_t hwpalette[256];
+
+	for (int i = 0; i < 256; ++i)
+	{
+		palette[i].r = GammaTable[0][SourcePalette[i].r];
+		palette[i].g = GammaTable[1][SourcePalette[i].g];
+		palette[i].b = GammaTable[2][SourcePalette[i].b];
+		palette[i].a = 0;
+	}
+	if (FlashAmount)
+	{
+		DoBlending (palette, palette, 256,
+			GammaTable[0][Flash.r], GammaTable[1][Flash.g],
+			GammaTable[2][Flash.b], FlashAmount);
+	}
+	for (int i = 0; i < 256; ++i)
+	{
+		hwpalette[i] = ((uint32_t)palette[i].r << 16) |
+			((uint32_t)palette[i].g << 8) |
+			(uint32_t)palette[i].b;
+	}
+	of_video_palette_bulk(hwpalette, 256);
+#else
 	if (NotPaletted)
 	{
 		PalEntry palette[256];
@@ -1006,11 +1129,21 @@ void SDLFB::UpdateColors ()
 				FlashAmount);
 		}
 #if SDL_VERSION_ATLEAST(2,0,0)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		if (UsingRenderer && DirectFramebuffer)
+		{
+			SDL_Palette palette;
+			palette.ncolors = 256;
+			SDL_SetPaletteColors(&palette, colors, 0, 256);
+			return;
+		}
+#endif
 		SDL_SetPaletteColors (Surface->format->palette, colors, 0, 256);
 #else
 		SDL_SetPalette (Screen, SDL_LOGPAL|SDL_PHYSPAL, colors, 0, 256);
 #endif
 	}
+#endif
 }
 
 PalEntry *SDLFB::GetPalette ()
@@ -1060,6 +1193,11 @@ void SDLFB::SetFullscreen (bool fullscreen)
 	fullscreen = true;
 #endif
 
+#if OF_ECWOLF_DIRECT_VIDEO
+	(void)fullscreen;
+	return;
+#endif
+
 #if SDL_VERSION_ATLEAST(2,0,0)
 	if (IsFullscreen() == fullscreen)
 		return;
@@ -1077,16 +1215,46 @@ void SDLFB::SetFullscreen (bool fullscreen)
 
 bool SDLFB::IsFullscreen ()
 {
+#if OF_ECWOLF_DIRECT_VIDEO
+	return true;
+#else
 #if SDL_VERSION_ATLEAST(2,0,0)
 	return (SDL_GetWindowFlags (Screen) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
 #else
 	return (Screen->flags & SDL_FULLSCREEN) != 0;
 #endif
+#endif
 }
 
 void SDLFB::ResetSDLRenderer ()
 {
+#if OF_ECWOLF_DIRECT_VIDEO
+	static bool logged_direct;
+
+	OF_WolfGPU_ResetVideoFrames();
+	UsingRenderer = false;
+	DirectFramebuffer = true;
+	NotPaletted = false;
+	Pitch = Width;
+	if (!OF_WolfGPU_CanUseVideoFrames(Width, Height))
+	{
+		I_FatalError("OpenFPGA direct GPU video is unavailable for %dx%d.",
+			Width, Height);
+		return;
+	}
+	if (!logged_direct)
+	{
+		printf("OpenFPGA GPU: direct triple-buffer video path enabled.\n");
+		logged_direct = true;
+	}
+	return;
+#else
+
 #if SDL_VERSION_ATLEAST(2,0,0)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_WolfGPU_ResetVideoFrames();
+	DirectFramebuffer = false;
+#endif
 	if (Renderer)
 	{
 		if (Texture)
@@ -1125,6 +1293,19 @@ void SDLFB::ResetSDLRenderer ()
 			int bpp;
 			SDL_PixelFormatEnumToMasks(format, &bpp, &Rmask, &Gmask, &Bmask, &Amask);
 			GPfx.SetFormat (bpp, Rmask, Gmask, Bmask);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC) && \
+	(defined(OF_ECWOLF_DIRECT_FRAMEBUFFER) || defined(OF_ECWOLF_GPU_PRESENT))
+			if (format == SDL_PIXELFORMAT_INDEX8 && bpp == 8)
+			{
+				if (OF_WolfGPU_CanUseVideoFrames(Width, Height))
+				{
+					DirectFramebuffer = true;
+					NotPaletted = false;
+					Pitch = Width;
+					printf("OpenFPGA GPU: direct triple-buffer present enabled.\n");
+				}
+			}
+#endif
 		}
 	}
 	else
@@ -1150,6 +1331,7 @@ void SDLFB::ResetSDLRenderer ()
 		SDL_RenderSetLogicalSize (Renderer, w, h);
 	}
 #endif
+#endif
 }
 
 void SDLFB::SetVSync (bool vsync)
@@ -1161,6 +1343,12 @@ void SDLFB::SetVSync (bool vsync)
 
 void SDLFB::ScaleCoordsFromWindow(SWORD &x, SWORD &y)
 {
+#if OF_ECWOLF_DIRECT_VIDEO
+	(void)x;
+	(void)y;
+	return;
+#else
+
 #if SDL_VERSION_ATLEAST(2,0,0)
 	int w, h;
 	SDL_GetWindowSize (Screen, &w, &h);
@@ -1193,6 +1381,7 @@ void SDLFB::ScaleCoordsFromWindow(SWORD &x, SWORD &y)
 		x = (SWORD)(x*Width/w);
 		y = (SWORD)(y*Height/h);
 	}
+#endif
 #endif
 }
 

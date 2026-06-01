@@ -12,8 +12,13 @@
 #include "dobject.h"
 #include "sndinfo.h"
 
+#ifdef OF_ECWOLF_OPENFPGA
+#define alOut(n,b) 		do { (void)(n); (void)(b); } while (0)
+#define alOutMusic(n,b)	do { (void)(n); (void)(b); } while (0)
+#else
 #define alOut(n,b) 		YM3812Write(oplChip, n, b, AdlibVolumePositioned)
 #define alOutMusic(n,b)	YM3812Write(oplChip, n, b, MusicVolume)
+#endif
 
 typedef enum
 {
@@ -125,9 +130,11 @@ extern  SDSMode         DigiMode;
 extern  SMMode          MusicMode;
 extern  bool            N3DTempoEmulation;
 static const int MAX_VOLUME = 20;
-static inline double MULTIPLY_VOLUME(const int &v)
+static inline int MIX_VOLUME_128(const int &v)
 {
-	return (double(v)+0.3)/(MAX_VOLUME+0.3);
+	const int numerator = (v * 10 + 3) * 128;
+	const int denominator = MAX_VOLUME * 10 + 3;
+	return (numerator + denominator - 1) / denominator;
 }
 extern	int				AdlibVolumePositioned;
 extern	int				AdlibVolume;

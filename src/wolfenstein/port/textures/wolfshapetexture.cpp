@@ -152,6 +152,13 @@ FTexture *WolfShapeTexture_TryCreate(FileReader &file, int lumpnum)
 	return new FWolfShapeTexture(lumpnum, file);
 }
 
+#ifdef OF_ECWOLF_OPENFPGA
+FTexture *WolfShapeTexture_CreateTrusted(FileReader &file, int lumpnum)
+{
+	return new FWolfShapeTexture(lumpnum, file);
+}
+#endif
+
 FTexture *MacShapeTexture_TryCreate(FileReader &file, int lumpnum)
 {
 	if(!CheckIfMacShape(file))
@@ -209,6 +216,15 @@ void FWolfShapeTexture::Init(FileReader &file)
 			break;
 	}
 
+#ifdef OF_ECWOLF_OPENFPGA
+	// Cropping requires a full lump read for every VSWAP sprite during texture
+	// registration. On Pocket that turns startup into many slow CD-backed random
+	// reads, so keep the original 64-pixel shape and crop lazily by transparency.
+	TopCrop = 0;
+	CalcBitSize ();
+	return;
+#endif
+
 	// Crop the height!
 	int minStart = 64;
 	int maxEnd = 0;
@@ -249,6 +265,12 @@ void FWolfShapeTexture::InitMac(FileReader &file)
 	TopOffset = 128;
 	yScale = FRACUNIT*2;
 	xScale = FRACUNIT*2;
+
+#ifdef OF_ECWOLF_OPENFPGA
+	TopCrop = 0;
+	CalcBitSize ();
+	return;
+#endif
 
 	// Crop the height!
 	int minStart = 128;

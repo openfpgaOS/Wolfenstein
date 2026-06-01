@@ -1,6 +1,27 @@
 // Music playback code from DOS port of Super 3-D Noah's Ark
 // Originally recreated as a part of reverse-engineering the DOS executable
 
+#ifdef OF_ECWOLF_OPENFPGA
+
+#include "wl_def.h"
+
+bool N3DTempoEmulation;
+volatile bool midiOn;
+const byte *midiData, *midiDataStart;
+
+void MIDI_IRQService(void)
+{
+}
+
+bool MIDI_TryToStart(const byte *seqPtr, int dataLen)
+{
+	(void)seqPtr;
+	(void)dataLen;
+	return false;
+}
+
+#else
+
 #ifdef USE_GPL
 #include "dosbox/dbopl.h"
 #else
@@ -491,3 +512,5 @@ MIDI_TryToStart(const byte *seqPtr, int dataLen)
     midiOn = true;
     return true;
 }
+
+#endif

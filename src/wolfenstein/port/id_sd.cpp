@@ -29,13 +29,16 @@
 #include "wl_def.h"
 #include <SDL_mixer.h>
 #include "w_wad.h"
+#include "resourcefiles/resourcefile.h"
 #include "zstring.h"
 #include "sndinfo.h"
 #include "sndseq.h"
+#ifndef OF_ECWOLF_OPENFPGA
 #ifdef USE_GPL
 #include "dosbox/dbopl.h"
 #else
 #include "mame/fmopl.h"
+#endif
 #endif
 #include "wl_main.h"
 #include "wl_net.h"
@@ -146,6 +149,9 @@ bool MIDI_TryToStart(const byte *seqPtr, int dataLen);
 static int musicchunk=-1;
 Mix_Music *music=NULL;
 TUniquePtr<byte[]> chunkmem;
+#ifdef OF_ECWOLF_OPENFPGA
+static FString OpenFPGAMusicChunk;
+#endif
 
 void musicFinished(void)
 {
@@ -158,15 +164,19 @@ void musicFinished(void)
 		chunkmem.Reset();
 
 		musicchunk = -1;
+#ifdef OF_ECWOLF_OPENFPGA
+		OpenFPGAMusicChunk = "";
+#endif
 	}
 }
 
 bool SD_UpdateMusicVolume(int which)
 {
-	Mix_VolumeMusic(static_cast<int> (ceil(128.0*MULTIPLY_VOLUME(MusicVolume))));
+	Mix_VolumeMusic(MIX_VOLUME_128(MusicVolume));
 	return 0;
 }
 
+#ifndef OF_ECWOLF_OPENFPGA
 #ifdef USE_GPL
 
 DBOPL::Chip oplChip;
@@ -231,10 +241,110 @@ static inline void YM3812UpdateOne(DBOPL::Chip &which, int16_t *stream, int leng
 extern const int oplChip = 0;
 
 #endif
+#endif
 
-#if !SDL_MIXER_VERSION_ATLEAST(2,6,0)
+#if !SDL_MIXER_VERSION_ATLEAST(2,6,0) && !defined(OF_ECWOLF_OPENFPGA)
 #warning SDL_mixer version lacks music position support
 static double Mix_GetMusicPosition(Mix_Music*) { return 0.0; }
+#endif
+
+#ifdef OF_ECWOLF_OPENFPGA
+
+static Mix_Music *SD_LoadMIDIMemory(const byte *data, int length)
+{
+	if(data == NULL || length <= 0)
+		return NULL;
+
+	SDL_RWops *rw = SDL_RWFromMem((void *)data, length);
+	if(rw == NULL)
+		return NULL;
+
+#if SDL_MIXER_VERSION_ATLEAST(2,0,0)
+	return Mix_LoadMUS_RW(rw, true);
+#else
+	return Mix_LoadMUS_RW(rw);
+#endif
+}
+
+static FResourceFile *MusicPack;
+static bool MusicPackProbed;
+
+static void SD_CloseMusicPack()
+{
+	delete MusicPack;
+	MusicPack = NULL;
+	MusicPackProbed = false;
+}
+
+static FResourceFile *SD_OpenMusicPack()
+{
+	if(MusicPackProbed)
+		return MusicPack;
+
+	MusicPackProbed = true;
+	static const char *packs[] = {
+		"wolfmidi.zip",
+		"WOLFMIDI.ZIP"
+	};
+
+	for(size_t i = 0;i < countof(packs);i++)
+	{
+		FResourceFile *pack = FResourceFile::OpenResourceFile(packs[i], NULL, true);
+		if(pack != NULL)
+		{
+			MusicPack = pack;
+			atterm(SD_CloseMusicPack);
+			printf("OpenFPGA: indexed music pack %s (%lu lumps).\n",
+				packs[i], (unsigned long)pack->LumpCount());
+			break;
+		}
+	}
+	if(MusicPack == NULL)
+		printf("OpenFPGA: wolfmidi.zip was not found; music disabled.\n");
+
+	return MusicPack;
+}
+
+static FResourceLump *SD_FindMusicPackLump(const char *chunk)
+{
+	FResourceFile *pack = SD_OpenMusicPack();
+	if(pack == NULL || chunk == NULL || chunk[0] == 0)
+		return NULL;
+
+	for(DWORD i = 0;i < pack->LumpCount();i++)
+	{
+		FResourceLump *lump = pack->GetLump(i);
+		if(lump == NULL || lump->Namespace != ns_music)
+			continue;
+		if(strcasecmp(lump->Name, chunk) == 0)
+			return lump;
+	}
+
+	return NULL;
+}
+
+static Mix_Music *SD_LoadMusicPackMIDI(const char *chunk)
+{
+	FResourceLump *lump = SD_FindMusicPackLump(chunk);
+	if(lump == NULL || lump->LumpSize <= 0 || lump->LumpSize > 1024 * 1024)
+		return NULL;
+
+	const byte *data = (const byte *)lump->CacheLump();
+	Mix_Music *loaded = SD_LoadMIDIMemory(data, lump->LumpSize);
+	lump->ReleaseCache();
+
+	if(loaded != NULL)
+		printf("OpenFPGA: using wolfmidi.zip replacement %s.\n", chunk);
+	return loaded;
+}
+
+static Mix_Music *SD_LoadExternalMIDI(const char *chunk)
+{
+	if(chunk == NULL || chunk[0] == 0)
+		return NULL;
+
+	return SD_LoadMusicPackMIDI(chunk);
+}
 #endif
 
 static void SDL_SoundFinished(void)
@@ -757,7 +867,7 @@ static int SD_PlayDigitized(const SoundData &which,int leftpos,int rightpos,Soun
 	if(sample == NULL)
 		return 0;
 
-	Mix_Volume(channel, static_cast<int> (ceil(128.0*MULTIPLY_VOLUME(SoundVolume))));
+	Mix_Volume(channel, MIX_VOLUME_128(SoundVolume));
 	if(Mix_PlayChannel(channel, sample, 0) == -1)
 	{
 		printf("Unable to play sound: %s\n", Mix_GetError());
@@ -987,6 +1097,7 @@ gloabal variables that need to be accessed in SDL_IMFMusicPlayer().
 
 static int numreadysamples = 0;
 static int soundTimeCounter = SOUND_TICKS;
+#ifndef OF_ECWOLF_OPENFPGA
 static void SDL_IMFMusicPlayer(void *udata, Uint8 *stream, int sampleslen)
 {
 	Sint16 *stream16 = (Sint16 *) (void *) stream;    // expect correct alignment
@@ -1088,12 +1199,16 @@ static void SDL_MixEmulators(void *udata, Uint8 *mixed_stream, int len)
 	static int stream_len = 0;
 	if(len > stream_len)
 	{
+#ifdef OF_ECWOLF_OPENFPGA
+		stream_len = len;
+#else
 		// If we're converting from stereo to surround then we need to ensure
 		// that this buffer is large enough to hold any intermediate conversions.
 		if(AudioCVTStereo.needed && AudioCVTStereo.len_mult > AudioCVTStereo.len_ratio)
 			stream_len = (sampleslen<<2)*AudioCVTStereo.len_mult;
 		else
 			stream_len = len;
+#endif
 		stream = (Uint8*)realloc(stream, stream_len);
 	}
 
@@ -1114,6 +1229,7 @@ static void SDL_MixEmulators(void *udata, Uint8 *mixed_stream, int len)
 	SDL_MixAudio(mixed_stream, stream, len, SDL_MIX_MAXVOLUME);
 #endif
 }
+#endif
 
 ///////////////////////////////////////////////////////////////////////////
 //
@@ -1150,6 +1266,7 @@ SDL_StartSB()
 	Mix_ReserveChannels(2);  // reserve player and boss weapon channels
 	Mix_GroupChannels(2, MIX_CHANNELS-1, 1); // group remaining channels
 
+#ifndef OF_ECWOLF_OPENFPGA
 	// Init music
 	if(YM3812Init(1,3579545,AudioSpec.frequency))
 	{
@@ -1163,9 +1280,10 @@ SDL_StartSB()
 
 	samplesPerMusicTick = AudioSpec.frequency / MUSIC_RATE; // SDL_t0FastAsmService played at 700Hz
 	Mix_SetPostMix(SDL_MixEmulators, 0);
+#endif
 	Mix_ChannelFinished(SD_ChannelFinished);
 
-	Mix_VolumeMusic(static_cast<int> (ceil(128.0*MULTIPLY_VOLUME(MusicVolume))));
+	Mix_VolumeMusic(MIX_VOLUME_128(MusicVolume));
 
 	// Make sure that the musicFinished() function is called when the music stops playing
 	Mix_HookMusicFinished(musicFinished);
@@ -1223,6 +1341,11 @@ bool SD_SetSoundMode(SDMode mode)
 bool SD_SetMusicMode(SMMode mode)
 {
 	bool result = false;
+
+#ifdef OF_ECWOLF_OPENFPGA
+	if(mode == smm_AdLib)
+		mode = smm_Midi;
+#endif
 
 	SD_FadeOutMusic();
 	while (SD_MusicPlaying())
@@ -1403,6 +1526,13 @@ int SD_PlaySound(const char* sound, SoundChannel chan)
 		return(true);
 	}
 
+	// The OpenFPGA build uses SDL_mixer digitized samples and MIDI music. The
+	// OPL/PC speaker mixer is not running, so never enter the synthesized
+	// sound-effect path: its playback pointers would not advance.
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	return 0;
+#endif
+
 	if (SoundMode == sdm_Off)
 		return 0;
 
@@ -1460,6 +1590,10 @@ int SD_PlaySound(const char* sound, SoundChannel chan)
 ///////////////////////////////////////////////////////////////////////////
 bool SD_SoundPlaying(void)
 {
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	return false;
+#endif
+
 	bool result = false;
 
 	switch (SoundMode)
@@ -1538,6 +1672,17 @@ SD_MusicOn(void)
 int
 SD_MusicOff(void)
 {
+#ifdef OF_ECWOLF_OPENFPGA
+	SDL_LockMutex(audioMutex);
+	sqActive = false;
+	midiOn = false;
+	SDL_UnlockMutex(audioMutex);
+
+	if(music != NULL)
+		Mix_HaltMusic();
+	OpenFPGAMusicChunk = "";
+	return 0;
+#else
 	word    i;
 	int musoffs;
 
@@ -1565,7 +1710,11 @@ SD_MusicOff(void)
 				if(Mix_PlayingMusic() == 1)
 				{
 					Mix_PauseMusic();
+#ifdef OF_ECWOLF_OPENFPGA
+					return 0;
+#else
 					return FLOAT2FIXED(Mix_GetMusicPosition(music));
+#endif
 				}
 				return 0;
 			}
@@ -1573,6 +1722,7 @@ SD_MusicOff(void)
 	}
 
 	return musoffs;
+#endif
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1594,6 +1744,45 @@ SD_StartMusic(const char* chunk)
 		0, 0, {0, 0, 0}
 	};
 
+#ifdef OF_ECWOLF_OPENFPGA
+	if (MusicMode == smm_Off || chunk == NULL || chunk[0] == 0)
+	{
+		SD_MusicOff();
+		return;
+	}
+
+	if(music != NULL && OpenFPGAMusicChunk.CompareNoCase(chunk) == 0)
+	{
+		if(Mix_PausedMusic() == 1)
+			Mix_ResumeMusic();
+		return;
+	}
+
+	SD_MusicOff();
+
+	if(music)
+		Mix_FreeMusic(music);
+	music = NULL;
+	chunkmem.Reset();
+	musicchunk = -1;
+	OpenFPGAMusicChunk = "";
+
+	music = SD_LoadExternalMIDI(chunk);
+	if(music != NULL)
+	{
+		SDL_LockMutex(audioMutex);
+		if (Mix_PlayMusic(music, -1) == -1)
+			printf("Unable to play music file: %s\n", Mix_GetError());
+		else
+			OpenFPGAMusicChunk = chunk;
+		SDL_UnlockMutex(audioMutex);
+	}
+	else
+	{
+		printf("OpenFPGA: wolfmidi.zip has no MIDI replacement for %s; music disabled.\n", chunk);
+	}
+	return;
+#else
 	SD_MusicOff();
 
 	if (MusicMode != smm_Off)
@@ -1667,11 +1856,17 @@ SD_StartMusic(const char* chunk)
 			SDL_UnlockMutex(audioMutex);
 		}
 	}
+#endif
 }
 
 void
 SD_ContinueMusic(const char* chunk, int startoffs)
 {
+#ifdef OF_ECWOLF_OPENFPGA
+	(void)startoffs;
+	SD_StartMusic(chunk);
+	return;
+#else
 	SD_MusicOff();
 
 	if (MusicMode != smm_Off)
@@ -1777,6 +1972,7 @@ SD_ContinueMusic(const char* chunk, int startoffs)
 			Mix_SetMusicPosition(FIXED2FLOAT(startoffs));
 		}
 	}
+#endif
 }
 
 ///////////////////////////////////////////////////////////////////////////

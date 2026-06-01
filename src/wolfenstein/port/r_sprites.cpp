@@ -52,6 +52,7 @@
 #include "a_inventory.h"
 #include "id_us.h"
 #include "id_vh.h"
+#include "of_ecwolf_gpu.h"
 
 #define TEX_DWNAME(tex) MAKE_ID(tex->Name[0], tex->Name[1], tex->Name[2], tex->Name[3])
 
@@ -427,17 +428,22 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 	const fixed yRun = MIN<fixed>(tex->GetHeight()<<FRACBITS, (yStep*((viewheight<<3)-upperedge))>>3);
 
 	const BYTE *colormap;
+	int shadeIndex = 0;
 	if((actor->flags & FL_BRIGHT) || frame->fullbright)
 		colormap = NormalLight.Maps;
 	else
 	{
 		const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
 		const int tz = FixedMul(r_depthvisibility<<8, height);
-		colormap = &NormalLight.Maps[GETPALOOKUP(MAX(tz, MINZ), shade)<<8];
+		shadeIndex = GETPALOOKUP(MAX(tz, MINZ), shade);
+		colormap = &NormalLight.Maps[shadeIndex<<8];
 	}
 	const BYTE *src;
 	byte *destBase = vbuf + actx + startX + ((upperedge>>3) > 0 ? vbufPitch*(upperedge>>3) : 0);
 	byte *dest = destBase;
+#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_WolfGPU_PreloadSource(tex->GetPixels(), tex->GetWidth() * tex->GetHeight());
+#endif
 	unsigned int i;
 	fixed x, y;
 	for(i = actx+startX, x = startX*xStep;x < xRun;x += xStep, ++i, dest = ++destBase)
@@ -446,6 +452,20 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 			continue;
 
 		src = tex->GetColumn(flip ? texWidth - (x>>FRACBITS) - 1 : (x>>FRACBITS), NULL);
+
+#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		{
+			const fixed yStart = startY*yStep;
+			const int count = yRun > yStart ? int((yRun - yStart + yStep - 1) / yStep) : 0;
+			if(count > 0 && OF_WolfGPU_DrawMaskedColumn(dest, count, src, tex->GetHeight(),
+				yStart, yStep, shadeIndex))
+			{
+				continue;
+			}
+			if(count > 0)
+				OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, vbufPitch);
+		}
+#endif
 
 		for(y = startY*yStep;y < yRun;y += yStep)
 		{
@@ -482,19 +502,24 @@ void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, con
 
 	// [XA] TODO: shade the sprite per-column?
 	const BYTE *colormap;
+	int shadeIndex = 0;
 	if((actor->flags & FL_BRIGHT) || frame->fullbright)
 		colormap = NormalLight.Maps;
 	else
 	{
 		const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
 		const int tz = FixedMul(r_depthvisibility<<8, height);
-		colormap = &NormalLight.Maps[GETPALOOKUP(MAX(tz, MINZ), shade)<<8];
+		shadeIndex = GETPALOOKUP(MAX(tz, MINZ), shade);
+		colormap = &NormalLight.Maps[shadeIndex<<8];
 	}
 	const BYTE *src;
 
 	byte *dest;
 	int i;
 	unsigned int x;
+#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_WolfGPU_PreloadSource(tex->GetPixels(), tex->GetWidth() * tex->GetHeight());
+#endif
 
 	//printf("%f, %f, %f, %f\n", FIXED2FLOAT(ny1), FIXED2FLOAT(ny2), FIXED2FLOAT(nx1), FIXED2FLOAT(nx1));
 	fixed dxx=(ny2-ny1)<<8,dzz=(nx2-nx1)<<8;
@@ -528,6 +553,24 @@ void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, con
 			continue;
 		
 		dest = vbuf + i + (upperedge > 0 ? vbufPitch*upperedge : 0);
+#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		{
+			const fixed yStart = startY*yStep;
+			const int count = endY > yStart ? int((endY - yStart + yStep - 1) / yStep) : 0;
+			if(count > 0 && OF_WolfGPU_DrawMaskedColumn(dest, count, src, tex->GetHeight(),
+				yStart, yStep, shadeIndex))
+			{
+				dyScale = (height/256.0)*(actor->scaleY/65536.);
+				upperedge = static_cast<int>((viewheight/2 - viewshift - topoffset)+scale - tex->GetScaledTopOffsetDouble()*dyScale);
+				yStep = static_cast<fixed>(tex->yScale/dyScale);
+				startY = -MIN(upperedge, 0);
+				endY = MIN<fixed>(tex->GetHeight()<<FRACBITS, yStep*(viewheight-upperedge));
+				continue;
+			}
+			if(count > 0)
+				OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, vbufPitch);
+		}
+#endif
 		for(fixed y = startY*yStep;y < endY;y += yStep)
 		{
 			if(src[y>>FRACBITS])
@@ -646,12 +689,14 @@ void R_DrawPlayerSprite(AActor *actor, const Frame *frame, fixed offsetX, fixed 
 		return;
 
 	const BYTE *colormap;
+	int shadeIndex = 0;
 	if(frame->fullbright)
 		colormap = NormalLight.Maps;
 	else
 	{
 		const int shade = LIGHT2SHADE(gLevelLight) - (gLevelMaxLightVis/LIGHTVISIBILITY_FACTOR);
-		colormap = &NormalLight.Maps[GETPALOOKUP(0, shade)<<8];
+		shadeIndex = GETPALOOKUP(0, shade);
+		colormap = &NormalLight.Maps[shadeIndex<<8];
 	}
 
 	const fixed scale = viewheight<<(FRACBITS-1);
@@ -680,10 +725,28 @@ void R_DrawPlayerSprite(AActor *actor, const Frame *frame, fixed offsetX, fixed 
 	const BYTE *src;
 	byte *destBase = vbuf+x1+startX + (y1 > 0 ? vbufPitch*y1 : 0);
 	byte *dest = destBase;
+#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_WolfGPU_PreloadSource(tex->GetPixels(), tex->GetWidth() * tex->GetHeight());
+#endif
 	fixed x, y;
 	for(x = startX*xStep;x < xRun;x += xStep)
 	{
 		src = tex->GetColumn(x>>FRACBITS, NULL);
+
+#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		{
+			const fixed yStart = startY*yStep;
+			const int count = yRun > yStart ? int((yRun - yStart + yStep - 1) / yStep) : 0;
+			if(count > 0 && OF_WolfGPU_DrawMaskedColumn(dest, count, src, tex->GetHeight(),
+				yStart, yStep, shadeIndex))
+			{
+				dest = ++destBase;
+				continue;
+			}
+			if(count > 0)
+				OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, vbufPitch);
+		}
+#endif
 
 		for(y = startY*yStep;y < yRun;y += yStep)
 		{

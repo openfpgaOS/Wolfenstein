@@ -105,11 +105,17 @@ void Config::ReadConfig()
 
 		Scanner sc(data, size);
 		sc.SetScriptIdentifier("Configuration");
+		// Parse defensively with CheckToken instead of MustGetToken: a stale or
+		// uninitialised nonvolatile config slot can contain garbage, and a
+		// malformed config must not abort/garble startup. Stop at the first bad
+		// token and fall back to defaults for the rest; a clean config is
+		// rewritten on exit (WriteConfig).
+		bool malformed = false;
 		while(sc.TokensLeft())  // Go until there is nothing left to read.
 		{
-			sc.MustGetToken(TK_Identifier);
+			if(!sc.CheckToken(TK_Identifier)) { malformed = true; break; }
 			FString index = sc->str;
-			sc.MustGetToken('=');
+			if(!sc.CheckToken('=')) { malformed = true; break; }
 			if(sc.CheckToken(TK_StringConst))
 			{
 				CreateSetting(index, "");
@@ -123,15 +129,17 @@ void Config::ReadConfig()
 					CreateSetting(index, 0);
 					GetSetting(index)->SetValue(negative ? -sc->number : sc->number);
 				}
-				else
+				else if(sc.CheckToken(TK_FloatConst))
 				{
-					sc.MustGetToken(TK_FloatConst);
 					CreateSetting(index, 0.0f);
 					GetSetting(index)->SetValue(negative ? -sc->decimal : sc->decimal);
 				}
+				else { malformed = true; break; }
 			}
-			sc.MustGetToken(';');
+			if(!sc.CheckToken(';')) { malformed = true; break; }
 		}
+		if(malformed)
+			printf("ReadConfig: ecwolf.cfg is malformed; using defaults (a clean config is written on exit).\n");
 
 		delete[] data;
 	}
