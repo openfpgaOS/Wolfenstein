@@ -9,6 +9,7 @@
 #include "of_cache.h"
 #include "of_caps.h"
 #include "of_gpu.h"
+#include "of_timer.h"
 #include "of_video.h"
 #include "r_data/colormaps.h"
 #include "wl_def.h"
@@ -59,14 +60,7 @@ static int gpu_batch_fb_step;
  *
  * This mirrors the Doom OpenFPGA renderer's proven flip-path model
  * (../Doom/src/doom/cdoom/doom/r_gpu.c: gpu_cpu_dirty_lines / gpu_cpu_valid_lines
- * / gpu_invalidate_rect_for_cpu / gpu_flush_cpu_dirty_lines).  Build with
- * -DOF_ECWOLF_GPU_NO_REGION_SYNC to fall back to the old drain-and-end-frame
- * behavior. */
-#if !defined(OF_ECWOLF_GPU_NO_REGION_SYNC)
-#define OF_ECWOLF_GPU_REGION_SYNC 1
-#else
-#define OF_ECWOLF_GPU_REGION_SYNC 0
-#endif
+ * / gpu_invalidate_rect_for_cpu / gpu_flush_cpu_dirty_lines). */
 
 #define GPU_FB_TRACK_LINE_BYTES 64u
 #define GPU_FB_TRACK_MAX_BYTES (512u * 1024u)
@@ -83,6 +77,7 @@ static uint32_t gpu_cpu_valid_lines[GPU_FB_TRACK_WORDS];
 static const int gpu_batch_max_lanes =
 	(int)OF_GPU_AFFINE_SPAN_GROUP_MAX_LANES;
 static const int gpu_source_cache_size = 512;
+static const int gpu_mask_cache_size = 1024;
 
 struct GpuSourceCacheRange
 {
@@ -90,9 +85,121 @@ struct GpuSourceCacheRange
 	uintptr_t end;
 };
 
+struct GpuMaskCacheEntry
+{
+	const uint8_t *source;
+	int source_len;
+	uint8_t state;
+};
+
 static GpuSourceCacheRange gpu_source_cache[gpu_source_cache_size];
 static unsigned int gpu_source_cache_next;
 static GpuSourceCacheRange gpu_source_cache_last;
+static GpuMaskCacheEntry gpu_mask_cache[gpu_mask_cache_size];
+static GpuMaskCacheEntry gpu_mask_cache_last;
+
+#if OF_ECWOLF_PERF_ENABLED
+static uint64_t wolf_perf_accum[OF_WOLF_PERF_COUNT];
+static uint64_t wolf_perf_frame_total;
+static uint64_t wolf_perf_tic_total;
+static uint32_t wolf_perf_window_start_us;
+static uint32_t wolf_perf_frame_start_us;
+static unsigned int wolf_perf_frames;
+static bool wolf_perf_frame_active;
+static const uint32_t wolf_perf_report_us = 10000000u;
+
+static unsigned int wolf_perf_avg(OFWolfPerfPhase phase)
+{
+	if(wolf_perf_frames == 0)
+		return 0;
+	return (unsigned int)(wolf_perf_accum[phase] / wolf_perf_frames);
+}
+
+uint32_t OF_WolfPerf_NowUS(void)
+{
+	return of_time_us();
+}
+
+void OF_WolfPerf_FrameStart(void)
+{
+	const uint32_t now = of_time_us();
+	if(wolf_perf_window_start_us == 0)
+		wolf_perf_window_start_us = now;
+	wolf_perf_frame_start_us = now;
+	wolf_perf_frame_active = true;
+}
+
+void OF_WolfPerf_Add(OFWolfPerfPhase phase, uint32_t start_us)
+{
+	if(!wolf_perf_frame_active || phase < 0 || phase >= OF_WOLF_PERF_COUNT)
+		return;
+	wolf_perf_accum[phase] += (uint32_t)(of_time_us() - start_us);
+}
+
+void OF_WolfPerf_AddTicks(unsigned int count)
+{
+	if(wolf_perf_frame_active)
+		wolf_perf_tic_total += count;
+}
+
+void OF_WolfPerf_FrameEnd(void)
+{
+	if(!wolf_perf_frame_active)
+		return;
+
+	const uint32_t now = of_time_us();
+	wolf_perf_frame_total += (uint32_t)(now - wolf_perf_frame_start_us);
+	wolf_perf_frames++;
+	wolf_perf_frame_active = false;
+
+	const uint32_t elapsed = now - wolf_perf_window_start_us;
+	if(elapsed < wolf_perf_report_us)
+		return;
+
+	const unsigned int fps_x10 =
+		(unsigned int)((uint64_t)wolf_perf_frames * 10000000ull / elapsed);
+	const unsigned int tics_x10 =
+		(unsigned int)(wolf_perf_tic_total * 10ull / wolf_perf_frames);
+	const unsigned int frame_avg =
+		(unsigned int)(wolf_perf_frame_total / wolf_perf_frames);
+
+	printf("perf %u.%u fr=%u ev=%u sim=%u sn=%u ctl=%u spn=%u th=%u fin=%u gc=%u r=%u lk=%u bg=%u cl=%u rm=%u st=%u wl=%u fl=%u sk=%u spr=%u wp=%u ul=%u ov=%u pr=%u aq=%u sd=%u mt=%u gw=%u t=%u.%u\n",
+		fps_x10 / 10, fps_x10 % 10, frame_avg,
+		wolf_perf_avg(OF_WOLF_PERF_EVENTS),
+		wolf_perf_avg(OF_WOLF_PERF_SIM),
+		wolf_perf_avg(OF_WOLF_PERF_SIM_SNAPSHOT),
+		wolf_perf_avg(OF_WOLF_PERF_SIM_CONTROLS),
+		wolf_perf_avg(OF_WOLF_PERF_SIM_SPAWN),
+		wolf_perf_avg(OF_WOLF_PERF_SIM_THINKERS),
+		wolf_perf_avg(OF_WOLF_PERF_SIM_FINISH),
+		wolf_perf_avg(OF_WOLF_PERF_SIM_GC),
+		wolf_perf_avg(OF_WOLF_PERF_RENDER),
+		wolf_perf_avg(OF_WOLF_PERF_RENDER_LOCK),
+		wolf_perf_avg(OF_WOLF_PERF_RENDER_BEGIN),
+		wolf_perf_avg(OF_WOLF_PERF_RENDER_CLEAR),
+		wolf_perf_avg(OF_WOLF_PERF_RENDER_MISC),
+		wolf_perf_avg(OF_WOLF_PERF_VIEW_SETUP),
+		wolf_perf_avg(OF_WOLF_PERF_WALLS),
+		wolf_perf_avg(OF_WOLF_PERF_FLOORCEIL),
+		wolf_perf_avg(OF_WOLF_PERF_SKY),
+		wolf_perf_avg(OF_WOLF_PERF_SPRITES),
+		wolf_perf_avg(OF_WOLF_PERF_WEAPON),
+		wolf_perf_avg(OF_WOLF_PERF_RENDER_UNLOCK),
+		wolf_perf_avg(OF_WOLF_PERF_OVERLAY),
+		wolf_perf_avg(OF_WOLF_PERF_PRESENT),
+		wolf_perf_avg(OF_WOLF_PERF_ACQUIRE),
+		wolf_perf_avg(OF_WOLF_PERF_SOUND),
+		wolf_perf_avg(OF_WOLF_PERF_MAINT),
+		wolf_perf_avg(OF_WOLF_PERF_GPU_FINISH),
+		tics_x10 / 10, tics_x10 % 10);
+
+	memset(wolf_perf_accum, 0, sizeof(wolf_perf_accum));
+	wolf_perf_frame_total = 0;
+	wolf_perf_tic_total = 0;
+	wolf_perf_window_start_us = now;
+	wolf_perf_frames = 0;
+}
+#endif
 
 static bool gpu_is_power_of_two(int value)
 {
@@ -127,6 +234,53 @@ static void gpu_reset_source_cache()
 	gpu_source_cache_next = 0;
 	gpu_source_cache_last.start = 0;
 	gpu_source_cache_last.end = 0;
+}
+
+static uint8_t gpu_classify_mask_source(const uint8_t *source, int source_len)
+{
+	if(source == NULL || source_len <= 0)
+		return 3;
+
+	if(gpu_mask_cache_last.source == source &&
+		gpu_mask_cache_last.source_len == source_len)
+	{
+		return gpu_mask_cache_last.state;
+	}
+
+	const uintptr_t key =
+		((uintptr_t)source >> 2) ^ ((uintptr_t)source >> 11) ^
+		(uintptr_t)source_len;
+	GpuMaskCacheEntry &slot =
+		gpu_mask_cache[key & (uintptr_t)(gpu_mask_cache_size - 1)];
+	if(slot.source == source && slot.source_len == source_len)
+	{
+		gpu_mask_cache_last = slot;
+		return slot.state;
+	}
+
+	bool sawZero = false;
+	bool sawOpaque = false;
+	for(int i = 0;i < source_len;i++)
+	{
+		if(source[i] == 0)
+			sawZero = true;
+		else
+			sawOpaque = true;
+		if(sawZero && sawOpaque)
+			break;
+	}
+
+	uint8_t state = 3;
+	if(!sawOpaque)
+		state = 1;
+	else if(!sawZero)
+		state = 2;
+
+	slot.source = source;
+	slot.source_len = source_len;
+	slot.state = state;
+	gpu_mask_cache_last = slot;
+	return state;
 }
 
 static void gpu_make_source_visible(const uint8_t *source, uint32_t bytes)
@@ -376,6 +530,71 @@ static bool gpu_can_batch(uint8_t flags, int tex_width, int tex_w_mask,
 		gpu_batch_fb_step == fb_step;
 }
 
+static bool gpu_region_within_active_frame(const uint8_t *dest, int count,
+	int fb_step)
+{
+	if(gpu_framebuffer == NULL || dest == NULL || count <= 0 ||
+		fb_step <= 0 || gpu_pitch <= 0 || gpu_height <= 0)
+	{
+		return false;
+	}
+
+	const uintptr_t base = (uintptr_t)gpu_framebuffer;
+	const uintptr_t first = (uintptr_t)dest;
+	const uintptr_t frame_bytes =
+		(uintptr_t)(gpu_height - 1) * (uintptr_t)gpu_pitch +
+		(uintptr_t)gpu_pitch;
+	const uintptr_t end = base + frame_bytes;
+	if(end < base || first < base || first >= end)
+		return false;
+
+	const uintptr_t last =
+		first + (uintptr_t)(count - 1) * (uintptr_t)fb_step;
+	if(last < first || last >= end)
+		return false;
+
+	if(fb_step == 1)
+	{
+		const uintptr_t row_off = (first - base) % (uintptr_t)gpu_pitch;
+		if(row_off + (uintptr_t)count > (uintptr_t)gpu_pitch)
+			return false;
+	}
+	return true;
+}
+
+static bool gpu_rect_within_active_frame(const uint8_t *dest, int width,
+	int height, int pitch)
+{
+	if(gpu_framebuffer == NULL || dest == NULL || width <= 0 ||
+		height <= 0 || pitch <= 0 || gpu_pitch <= 0 || gpu_height <= 0)
+	{
+		return false;
+	}
+
+	const uintptr_t base = (uintptr_t)gpu_framebuffer;
+	const uintptr_t first = (uintptr_t)dest;
+	const uintptr_t frame_bytes =
+		(uintptr_t)(gpu_height - 1) * (uintptr_t)gpu_pitch +
+		(uintptr_t)gpu_pitch;
+	const uintptr_t end = base + frame_bytes;
+	if(end < base || first < base || first >= end)
+		return false;
+
+	const uintptr_t row_off = (first - base) % (uintptr_t)gpu_pitch;
+	if((uintptr_t)width > (uintptr_t)gpu_pitch ||
+		row_off + (uintptr_t)width > (uintptr_t)gpu_pitch)
+	{
+		return false;
+	}
+
+	const uintptr_t last = first +
+		(uintptr_t)(height - 1) * (uintptr_t)pitch +
+		(uintptr_t)(width - 1);
+	if(last < first || last >= end)
+		return false;
+	return true;
+}
+
 static bool gpu_add_affine(uint8_t *dest, int count, const uint8_t *source,
 	int source_len, int tex_width, int tex_w_mask, int tex_h_mask,
 	int sfrac, int tfrac, int sstep, int tstep, int light, int fb_step,
@@ -393,6 +612,8 @@ static bool gpu_add_affine(uint8_t *dest, int count, const uint8_t *source,
 	{
 		return false;
 	}
+	if(!gpu_region_within_active_frame(dest, count, fb_step))
+		return false;
 
 	gpu_prepare_for_gpu_write();
 
@@ -621,17 +842,26 @@ static bool gpu_acquire_video_draw_buffer(int width, int height)
 	}
 
 	uint32_t frame_bytes = (uint32_t)pitch * (uint32_t)height;
+	bool wrote_preserved_frame = false;
 	if(preserve && gpu_video_last_fb != NULL && gpu_video_last_fb != draw_fb)
+	{
 		memcpy(draw_fb, gpu_video_last_fb, frame_bytes);
+		wrote_preserved_frame = true;
+	}
 	else if(preserve && gpu_video_last_fb == NULL)
+	{
 		memset(draw_fb, 0, frame_bytes);
+		wrote_preserved_frame = true;
+	}
+	if(wrote_preserved_frame)
+		of_cache_flush_range(draw_fb, frame_bytes);
 
 	gpu_video_draw_idx = draw_idx;
 	gpu_video_draw_fb = draw_fb;
 	gpu_video_pitch = pitch;
 	gpu_video_height = height;
 	gpu_video_frame_bytes = frame_bytes;
-	gpu_video_clean_first_begin = !preserve;
+	gpu_video_clean_first_begin = true;
 	return true;
 }
 
@@ -676,7 +906,11 @@ bool OF_WolfGPU_PresentVideoFrame(void)
 		if(gpu_cpu_dirty)
 		{
 			if(gpu_frame_dirty)
+			{
+				const uint32_t perfStart = OF_WolfPerf_NowUS();
 				of_gpu_finish();
+				OF_WolfPerf_Add(OF_WOLF_PERF_GPU_FINISH, perfStart);
+			}
 			gpu_flush_cpu_dirty_lines();
 		}
 		gpu_frame_active = false;
@@ -748,12 +982,9 @@ void OF_WolfGPU_BeginFrame(uint8_t *framebuffer, int pitch, int height)
 	gpu_reset_cpu_cache_tracking();
 
 	uint32_t bytes = (uint32_t)((height - 1) * pitch + pitch);
-	/* A freshly acquired non-preserve buffer has no pending CPU writes (its
-	 * previous use flushed them at present), so this whole-view flush is
-	 * redundant.  The old extra `framebuffer == gpu_video_draw_fb` guard never
-	 * matched the centered 320x200-in-320x240 viewport, so it flushed ~64KB
-	 * every gameplay frame.  Preserve frames still flush (clean_first_begin is
-	 * only set for non-preserve acquires). */
+	/* Direct video acquisition leaves the draw buffer clean for the GPU:
+	 * non-preserve frames have no CPU writes, and preserve copies are flushed
+	 * immediately after the memcpy/memset. */
 	if(gpu_video_clean_first_begin)
 	{
 		gpu_video_clean_first_begin = false;
@@ -774,7 +1005,9 @@ void OF_WolfGPU_EndFrame(void)
 	const bool had_gpu_work = gpu_frame_dirty;
 	if(had_gpu_work)
 	{
+		const uint32_t perfStart = OF_WolfPerf_NowUS();
 		of_gpu_finish();
+		OF_WolfPerf_Add(OF_WOLF_PERF_GPU_FINISH, perfStart);
 		gpu_frame_dirty = false;
 	}
 	/* Write back any CPU overlay lines already tracked this frame before the
@@ -817,13 +1050,6 @@ void OF_WolfGPU_PrepareForCPUAccessRect(uint8_t *dest, int width, int height,
 	if(!gpu_available || !gpu_frame_active)
 		return;
 
-#if !OF_ECWOLF_GPU_REGION_SYNC
-	(void)dest;
-	(void)width;
-	(void)height;
-	(void)pitch;
-	OF_WolfGPU_EndFrame();
-#else
 	if(width <= 0 || height <= 0 || pitch <= 0)
 		return;
 
@@ -848,13 +1074,14 @@ void OF_WolfGPU_PrepareForCPUAccessRect(uint8_t *dest, int width, int height,
 	 * re-drain unless new GPU work was queued in between. */
 	if(gpu_frame_dirty)
 	{
+		const uint32_t perfStart = OF_WolfPerf_NowUS();
 		of_gpu_finish();
+		OF_WolfPerf_Add(OF_WOLF_PERF_GPU_FINISH, perfStart);
 		gpu_frame_dirty = false;
 	}
 
 	gpu_invalidate_rect_for_cpu(dest, width, height, pitch);
 	gpu_mark_cpu_dirty_rect(dest, width, height, pitch);
-#endif
 }
 
 void OF_WolfGPU_PrepareForCPUAccessColumn(uint8_t *dest, int count, int pitch)
@@ -882,13 +1109,66 @@ bool OF_WolfGPU_DrawMaskedColumn(uint8_t *dest, int count,
 	const uint8_t *source, int source_len, int texfrac, int texstep,
 	int light)
 {
+	if(!gpu_available || !gpu_frame_active)
+		return false;
+	if(dest == NULL || source == NULL || count <= 0)
+		return false;
 	if(!gpu_is_power_of_two(source_len) || source_len > 256)
 		return false;
 
-	return gpu_add_affine(dest, count, source, source_len,
-		1, 0, source_len - 1,
-		0, texfrac, 0, texstep, light, gpu_pitch,
-		OF_GPU_SPAN_COLORMAP | OF_GPU_SPAN_SKIP_ZERO);
+	const int texmask = source_len - 1;
+	const uint8_t maskState = gpu_classify_mask_source(source, source_len);
+	if(maskState == 1)
+		return true;
+	if(maskState == 2)
+	{
+		return gpu_add_affine(dest, count, source, source_len,
+			1, 0, texmask, 0, texfrac, 0, texstep, light, gpu_pitch,
+			OF_GPU_SPAN_COLORMAP);
+	}
+
+	int run_start = -1;
+	int run_count = 0;
+	int run_texfrac = 0;
+	int cur_texfrac = texfrac;
+
+	for(int i = 0; i < count; ++i, cur_texfrac += texstep)
+	{
+		const int sample = (cur_texfrac >> FRACBITS) & texmask;
+		if(source[sample] != 0)
+		{
+			if(run_count == 0)
+			{
+				run_start = i;
+				run_texfrac = cur_texfrac;
+			}
+			run_count++;
+			continue;
+		}
+
+		if(run_count != 0)
+		{
+			if(!gpu_add_affine(dest + run_start * gpu_pitch, run_count,
+				source, source_len, 1, 0, texmask, 0, run_texfrac,
+				0, texstep, light, gpu_pitch, OF_GPU_SPAN_COLORMAP))
+			{
+				return false;
+			}
+			run_count = 0;
+			run_start = -1;
+		}
+	}
+
+	if(run_count != 0)
+	{
+		if(!gpu_add_affine(dest + run_start * gpu_pitch, run_count,
+			source, source_len, 1, 0, texmask, 0, run_texfrac,
+			0, texstep, light, gpu_pitch, OF_GPU_SPAN_COLORMAP))
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 bool OF_WolfGPU_DrawRawColumn(uint8_t *dest, int count,
@@ -927,6 +1207,8 @@ bool OF_WolfGPU_ClearSpan(uint8_t *dest, int count, uint8_t color)
 		return false;
 	if(dest == NULL || count <= 0 || count > 65535)
 		return false;
+	if(!gpu_rect_within_active_frame(dest, count, 1, gpu_pitch))
+		return false;
 
 	gpu_prepare_for_gpu_write();
 	gpu_flush_batch();
@@ -945,6 +1227,8 @@ bool OF_WolfGPU_ClearRect(uint8_t *dest, int width, int height, uint8_t color)
 	{
 		return false;
 	}
+	if(!gpu_rect_within_active_frame(dest, width, height, gpu_pitch))
+		return false;
 
 	gpu_prepare_for_gpu_write();
 	gpu_flush_batch();

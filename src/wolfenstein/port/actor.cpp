@@ -91,7 +91,8 @@ bool Frame::ActionCall::operator() (AActor *self, AActor *stateOwner, const Fram
 {
 	if(pointer)
 	{
-		args->Evaluate(self);
+		if(args->NeedsEvaluation())
+			args->Evaluate(self);
 		return pointer(self, stateOwner, caller, *args, result);
 	}
 	return false;
@@ -423,6 +424,32 @@ bool AActor::InStateSequence(const Frame *basestate) const
 	return true;
 }
 
+void AActor::SnapshotRenderState()
+{
+	oldx = x;
+	oldy = y;
+	oldz = z;
+	oldangle = angle;
+	oldpitch = pitch;
+}
+
+void AActor::SnapshotRenderStates()
+{
+	for(AActor::Iterator iter = AActor::GetIterator();iter.Next();)
+		iter->SnapshotRenderState();
+}
+
+void AActor::SyncRenderState()
+{
+	SnapshotRenderState();
+}
+
+void AActor::SyncRenderStates()
+{
+	for(AActor::Iterator iter = AActor::GetIterator();iter.Next();)
+		iter->SyncRenderState();
+}
+
 bool AActor::IsFast() const
 {
 	return (flags & FL_ALWAYSFAST) || gamestate.difficulty->FastMonsters;
@@ -508,6 +535,8 @@ void AActor::Serialize(FArchive &arc)
 		actors.Remove(this);
 
 	Super::Serialize(arc);
+	if(arc.IsLoading())
+		SyncRenderState();
 }
 
 void AActor::SetIdle()
@@ -578,6 +607,7 @@ bool AActor::Teleport(fixed x, fixed y, angle_t angle, bool nofog)
 	this->x = x;
 	this->y = y;
 	this->angle = angle;
+	SyncRenderState();
 
 	EnterZone(destination->zone);
 
@@ -664,6 +694,7 @@ void AActor::FinishSpawningActors()
 
 		// Run the first action pointer and all zero tic states!
 		actor->SetState(actor->state);
+		actor->SyncRenderState();
 		actor->ObjectFlags &= ~OF_JustSpawned;
 	}
 	SpawnedActors.Clear();
@@ -685,6 +716,7 @@ AActor *AActor::Spawn(const ClassDef *type, fixed x, fixed y, fixed z, int flags
 	actor->x = x;
 	actor->y = y;
 	actor->z = z;
+	actor->SyncRenderState();
 	actor->velx = 0;
 	actor->vely = 0;
 	actor->health = actor->SpawnHealth();

@@ -330,6 +330,7 @@ private:
 	bool NotPaletted;
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	bool DirectFramebuffer;
+	bool DirectFramebufferAcquired;
 #endif
 
 	void UpdateColors ();
@@ -713,6 +714,7 @@ SDLFB::SDLFB (int width, int height, bool fullscreen)
 	NotPaletted = false;
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	DirectFramebuffer = false;
+	DirectFramebufferAcquired = false;
 #endif
 	FlashAmount = 0;
 
@@ -726,6 +728,7 @@ SDLFB::SDLFB (int width, int height, bool fullscreen)
 	Screen = NULL;
 	UsingRenderer = false;
 	DirectFramebuffer = true;
+	DirectFramebufferAcquired = false;
 	NotPaletted = false;
 	Pitch = Width;
 	if (!OF_WolfGPU_CanUseVideoFrames(width, height))
@@ -865,6 +868,7 @@ bool SDLFB::Lock (bool buffered)
 			}
 			Buffer = (BYTE *)pixels;
 			Pitch = pitch;
+			DirectFramebufferAcquired = true;
 		}
 		LockCount++;
 		return false;
@@ -897,6 +901,22 @@ void SDLFB::Unlock ()
 
 void SDLFB::Update ()
 {
+#if OF_ECWOLF_DIRECT_VIDEO
+	if (DirectFramebuffer)
+	{
+		if (LockCount > 1)
+		{
+			UpdatePending = true;
+			--LockCount;
+			return;
+		}
+		if (LockCount <= 0 && !DirectFramebufferAcquired)
+		{
+			return;
+		}
+	}
+	else
+#endif
 	if (LockCount != 1)
 	{
 		if (LockCount > 0)
@@ -945,6 +965,7 @@ void SDLFB::Update ()
 		{
 			I_FatalError("OpenFPGA direct GPU framebuffer present failed.");
 		}
+		DirectFramebufferAcquired = false;
 		return;
 	}
 	I_FatalError("OpenFPGA direct GPU video path disabled unexpectedly.");
@@ -1234,6 +1255,7 @@ void SDLFB::ResetSDLRenderer ()
 	OF_WolfGPU_ResetVideoFrames();
 	UsingRenderer = false;
 	DirectFramebuffer = true;
+	DirectFramebufferAcquired = false;
 	NotPaletted = false;
 	Pitch = Width;
 	if (!OF_WolfGPU_CanUseVideoFrames(Width, Height))
@@ -1254,6 +1276,7 @@ void SDLFB::ResetSDLRenderer ()
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	OF_WolfGPU_ResetVideoFrames();
 	DirectFramebuffer = false;
+	DirectFramebufferAcquired = false;
 #endif
 	if (Renderer)
 	{
@@ -1293,13 +1316,13 @@ void SDLFB::ResetSDLRenderer ()
 			int bpp;
 			SDL_PixelFormatEnumToMasks(format, &bpp, &Rmask, &Gmask, &Bmask, &Amask);
 			GPfx.SetFormat (bpp, Rmask, Gmask, Bmask);
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC) && \
-	(defined(OF_ECWOLF_DIRECT_FRAMEBUFFER) || defined(OF_ECWOLF_GPU_PRESENT))
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 			if (format == SDL_PIXELFORMAT_INDEX8 && bpp == 8)
 			{
 				if (OF_WolfGPU_CanUseVideoFrames(Width, Height))
 				{
 					DirectFramebuffer = true;
+					DirectFramebufferAcquired = false;
 					NotPaletted = false;
 					Pitch = Width;
 					printf("OpenFPGA GPU: direct triple-buffer present enabled.\n");

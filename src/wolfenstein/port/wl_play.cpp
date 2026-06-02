@@ -66,6 +66,8 @@ unsigned short Paused;
 //
 bool noadaptive = false;
 unsigned tics;
+fixed renderfraction = FRACUNIT;
+int32_t renderbasetimecount = 0;
 
 //
 // control info
@@ -190,6 +192,55 @@ int32_t GetTimeCount()
 	return MS2TICS(SDL_GetTicks());
 }
 
+static void UseCurrentRenderTime()
+{
+	renderfraction = FRACUNIT;
+	renderbasetimecount = gamestate.TimeCount;
+}
+
+static void UpdateRenderInterpolation()
+{
+	if((Paused & 1) || Net::IsBlocked() || gamestate.TimeCount <= 0)
+	{
+		UseCurrentRenderTime();
+		return;
+	}
+
+	const uint32_t curtime = SDL_GetTicks();
+	const uint32_t ticstart = TICS2MS((uint32_t)lasttimecount);
+	const uint32_t into = curtime > ticstart ? curtime - ticstart : 0;
+	uint64_t frac = (uint64_t)into * TICRATE * FRACUNIT / 1000;
+	if(frac > FRACUNIT)
+		frac = FRACUNIT;
+
+	renderfraction = (fixed)frac;
+	renderbasetimecount = gamestate.TimeCount - 1;
+}
+
+static void SnapshotPlayerRenderStates()
+{
+	for(unsigned int i = 0;i < MAXPLAYERS;++i)
+		players[i].oldbob = players[i].bob;
+}
+
+static void SyncPlayerRenderStates()
+{
+	SnapshotPlayerRenderStates();
+}
+
+static bool AnyPlayerNeedsSpawn()
+{
+	for(unsigned int p = 0;p < Net::InitVars.numPlayers;++p)
+	{
+		if(players[p].state == player_t::PST_ENTER ||
+			players[p].state == player_t::PST_REBORN)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 /*
 =====================
 =
@@ -220,8 +271,16 @@ void CalcTics()
 		SDL_Delay(TICS2MS(lasttimecount + 1) - curtime);
 		tics = 1;
 	}
-	else if(noadaptive || Net::IsBlocked())
+	else if(Net::IsBlocked())
 		tics = 1;
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
+	else if(noadaptive)
+		tics = 1;
+#else
+	// OpenFPGA presents at display cadence; capping to one 70 Hz tic per
+	// 60 Hz frame slows gameplay, so keep real elapsed tic catch-up.
+	(void)noadaptive;
+#endif
 
 	lasttimecount += tics;
 
@@ -232,6 +291,7 @@ void CalcTics()
 void ResetTimeCount()
 {
 	lasttimecount = GetTimeCount();
+	UseCurrentRenderTime();
 }
 
 void Delay(int wolfticks)
@@ -997,10 +1057,14 @@ void FinishPaletteShifts (void)
 
 void PlayFrame()
 {
+	UpdateRenderInterpolation();
 	UpdatePaletteShifts ();
 
+	uint32_t perfStart = OF_WolfPerf_NowUS();
 	ThreeDRefresh ();
+	OF_WolfPerf_Add(OF_WOLF_PERF_RENDER, perfStart);
 
+	perfStart = OF_WolfPerf_NowUS();
 	if((automap && !gamestate.victoryflag) || (Paused & 1) ||
 		Net::IsBlocked() || (!loadedgame && viewsize != 21) || screenfaded)
 	{
@@ -1030,8 +1094,9 @@ void PlayFrame()
 		VW_FadeIn ();
 		ResetTimeCount();
 	}
+	OF_WolfPerf_Add(OF_WOLF_PERF_OVERLAY, perfStart);
 
-	VH_UpdateScreen();
+	VH_UpdateScreen(playstate != ex_stillplaying || screenfaded);
 }
 
 /*
@@ -1074,10 +1139,17 @@ void PlayLoop (void)
 		IN_StartAck (ACK_Local);
 
 	StatusBar->NewGame();
+	AActor::SyncRenderStates();
+	SyncPlayerRenderStates();
+	UseCurrentRenderTime();
 
 	do
 	{
+		OF_WolfPerf_FrameStart();
+		uint32_t perfStart = OF_WolfPerf_NowUS();
 		ProcessEvents();
+		OF_WolfPerf_Add(OF_WOLF_PERF_EVENTS, perfStart);
+		OF_WolfPerf_AddTicks(tics);
 
 //
 // actor thinking
@@ -1085,9 +1157,19 @@ void PlayLoop (void)
 		madenoise = false;
 
 		// Run tics
+		perfStart = OF_WolfPerf_NowUS();
 		for (unsigned int i = 0;i < tics;++i)
 		{
+			if(!Paused)
+			{
+				const uint32_t snapshotStart = OF_WolfPerf_NowUS();
+				AActor::SnapshotRenderStates();
+				SnapshotPlayerRenderStates();
+				OF_WolfPerf_Add(OF_WOLF_PERF_SIM_SNAPSHOT, snapshotStart);
+			}
+			uint32_t ticPartStart = OF_WolfPerf_NowUS();
 			PollControls(!i);
+			OF_WolfPerf_Add(OF_WOLF_PERF_SIM_CONTROLS, ticPartStart);
 
 			// Net code may require this loop to abort early
 			if(playstate != ex_stillplaying)
@@ -1097,32 +1179,52 @@ void PlayLoop (void)
 			{
 				++gamestate.TimeCount;
 
-				CheckSpawnPlayer();
+				if(AnyPlayerNeedsSpawn())
+				{
+					ticPartStart = OF_WolfPerf_NowUS();
+					CheckSpawnPlayer();
+					OF_WolfPerf_Add(OF_WOLF_PERF_SIM_SPAWN, ticPartStart);
+				}
 
 				// In single player if the player dies only tick the pawn
+				ticPartStart = OF_WolfPerf_NowUS();
 				if(Net::InitVars.mode != Net::MODE_SinglePlayer || players[0].state != player_t::PST_DEAD)
 					thinkerList.Tick();
 				else
 					thinkerList.Tick(ThinkerList::PLAYER);
+				OF_WolfPerf_Add(OF_WOLF_PERF_SIM_THINKERS, ticPartStart);
 
+				ticPartStart = OF_WolfPerf_NowUS();
 				AActor::FinishSpawningActors();
+				OF_WolfPerf_Add(OF_WOLF_PERF_SIM_FINISH, ticPartStart);
+
+				ticPartStart = OF_WolfPerf_NowUS();
+				GC::CheckGC();
+				OF_WolfPerf_Add(OF_WOLF_PERF_SIM_GC, ticPartStart);
 			}
 		}
+		OF_WolfPerf_Add(OF_WOLF_PERF_SIM, perfStart);
 
 		PlayFrame();
 
 		//
 		// MAKE FUNNY FACE IF BJ DOESN'T MOVE FOR AWHILE
 		//
+		perfStart = OF_WolfPerf_NowUS();
 		funnyticount += tics;
 
 		TexMan.UpdateAnimations(lasttimecount*14);
 		GC::CheckGC();
+		OF_WolfPerf_Add(OF_WOLF_PERF_MAINT, perfStart);
 
+		perfStart = OF_WolfPerf_NowUS();
 		UpdateSoundLoc ();      // JAB
+		OF_WolfPerf_Add(OF_WOLF_PERF_SOUND, perfStart);
 
+		perfStart = OF_WolfPerf_NowUS();
 		CheckKeys ();
 		CheckDebugKeys ();
+		OF_WolfPerf_Add(OF_WOLF_PERF_MAINT, perfStart);
 
 //
 // debug aids
@@ -1143,6 +1245,7 @@ void PlayLoop (void)
 				playstate = ex_abort;
 			}
 		}
+		OF_WolfPerf_FrameEnd();
 	}
 	while (!playstate && !startgame);
 

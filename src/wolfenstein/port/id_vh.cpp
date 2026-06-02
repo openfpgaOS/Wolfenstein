@@ -6,6 +6,7 @@
 #include "id_sd.h"
 #include "id_vl.h"
 #include "id_vh.h"
+#include "of_ecwolf_gpu.h"
 #include "w_wad.h"
 #include "v_font.h"
 #include "v_palette.h"
@@ -15,6 +16,10 @@
 #include "templates.h"
 
 int	    pa=MENU_CENTER,px,py;
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+static bool deferredScreenAcquire;
+#endif
 
 //==========================================================================
 
@@ -148,11 +153,37 @@ void Blit8BitSurfaceToTexture(SDL_Texture *tex, SDL_Surface *surf)
 }
 #endif
 
-void VH_UpdateScreen()
+void VH_UpdateScreen(bool reacquire)
 {
+	uint32_t perfStart = OF_WolfPerf_NowUS();
 	screen->Update();
+	OF_WolfPerf_Add(OF_WOLF_PERF_PRESENT, perfStart);
+	perfStart = OF_WolfPerf_NowUS();
 	SD_PumpSoundLoads();
+	OF_WolfPerf_Add(OF_WOLF_PERF_SOUND, perfStart);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	if(!reacquire)
+	{
+		deferredScreenAcquire = true;
+		return;
+	}
+#else
+	(void)reacquire;
+#endif
+	perfStart = OF_WolfPerf_NowUS();
 	screen->Lock(false);
+	OF_WolfPerf_Add(OF_WOLF_PERF_ACQUIRE, perfStart);
+}
+
+void VH_AcquireDeferredScreenLock()
+{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	if(deferredScreenAcquire)
+	{
+		screen->Lock(false);
+		deferredScreenAcquire = false;
+	}
+#endif
 }
 
 /*

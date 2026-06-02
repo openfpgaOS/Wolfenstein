@@ -28,6 +28,7 @@ extern  unsigned screenloc[3];
 extern  bool fpscounter;
 
 extern  fixed   viewx,viewy;                    // the focal point
+extern  angle_t viewangle;
 extern  fixed   viewsin,viewcos;
 
 void    ThreeDStartFadeIn ();

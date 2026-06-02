@@ -5,7 +5,6 @@
 #include "g_mapinfo.h"
 #include "wl_def.h"
 #include "wl_draw.h"
-#include "wl_iwad.h"
 #include "wl_main.h"
 #include "wl_shade.h"
 #include "r_data/colormaps.h"
@@ -167,6 +166,195 @@ static bool R_GetDefaultPlaneSolidColor(bool floor, byte &color)
 	return R_TextureSolidColor(texture, color);
 }
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+static FTexture *R_GetDefaultPlaneTexture(bool floor)
+{
+	if(levelInfo == NULL)
+		return NULL;
+
+	const FTextureID texture =
+		levelInfo->DefaultTexture[floor ? MapSector::Floor : MapSector::Ceiling];
+	if(!texture.isValid())
+		return NULL;
+	return TexMan(texture);
+}
+
+static bool R_TextureFirstColor(FTexture *texture, byte &color)
+{
+	if(texture == NULL)
+		return false;
+
+	const byte *pixels = texture->GetPixels();
+	if(pixels == NULL || texture->GetWidth() <= 0 || texture->GetHeight() <= 0)
+		return false;
+
+	color = pixels[0];
+	return true;
+}
+
+static byte R_ShadeSolidPlaneRow(fixed planeheight, int rowDistance,
+	byte baseColor)
+{
+	if(rowDistance <= 0)
+		rowDistance = 1;
+
+	const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
+	const int tz = FixedMul(FixedDiv(r_depthvisibility, abs(planeheight)),
+		rowDistance << FRACBITS);
+	const int shadeIndex = GETPALOOKUP(tz, shade);
+	return NormalLight.Maps[(shadeIndex << 8) + baseColor];
+}
+
+static bool R_ClearSolidBackdropHalfGPU(byte *vbuf, unsigned vbufPitch,
+	int yStart, int yEnd, int horizon, fixed planeheight, byte baseColor)
+{
+	if(planeheight == 0 || yStart >= yEnd)
+		return true;
+
+	for(int y = yStart; y < yEnd;)
+	{
+		const int rowDistance = y < horizon ? horizon - y : y - horizon + 1;
+		const byte rowColor =
+			R_ShadeSolidPlaneRow(planeheight, rowDistance, baseColor);
+
+		int runEnd = y + 1;
+		while(runEnd < yEnd)
+		{
+			const int nextDistance =
+				runEnd < horizon ? horizon - runEnd : runEnd - horizon + 1;
+			if(R_ShadeSolidPlaneRow(planeheight, nextDistance, baseColor) !=
+				rowColor)
+			{
+				break;
+			}
+			++runEnd;
+		}
+
+		if(!OF_WolfGPU_ClearRect(vbuf + y * (int)vbufPitch, viewwidth,
+			runEnd - y, rowColor))
+		{
+			return false;
+		}
+		y = runEnd;
+	}
+	return true;
+}
+
+static bool R_DrawTexturedBackdropHalfGPU(byte *vbuf, unsigned vbufPitch,
+	int yStart, int yEnd, int horizon, fixed planeheight, bool floor,
+	FTexture *texture)
+{
+	if(planeheight == 0 || yStart >= yEnd)
+		return true;
+	if(texture == NULL || texture->bMasked)
+		return false;
+
+	const int texwidth = texture->GetWidth();
+	const int texheight = texture->GetHeight();
+	const byte *tex = texture->GetPixels();
+	if(tex == NULL || texwidth != 64 || texheight != 64 ||
+		texture->xScale != FRACUNIT || texture->yScale != FRACUNIT)
+	{
+		return false;
+	}
+
+	OF_WolfGPU_PreloadSource(tex, (uint32_t)(texwidth * texheight));
+
+	const int viewxFrac = (viewx & (FRACUNIT - 1)) << 8;
+	const int viewyFrac = (viewy & (FRACUNIT - 1)) << 8;
+	const fixed planenumerator = abs(FixedMul(heightnumerator, planeheight));
+	const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
+
+	for(int y = yStart; y < yEnd; ++y)
+	{
+		const int rowDistance = floor ? y - horizon + 1 : horizon - y;
+		if(rowDistance <= 0)
+			continue;
+
+		const fixed dist = (planenumerator / rowDistance) << 8;
+		fixed gu = viewxFrac + FixedMul(dist, viewcos);
+		fixed gv = -viewyFrac + FixedMul(dist, viewsin);
+		const fixed texStep = dist / scale;
+		const fixed du = FixedMul(texStep, viewsin);
+		const fixed dv = -FixedMul(texStep, viewcos);
+		gu -= (viewwidth >> 1) * du;
+		gv -= (viewwidth >> 1) * dv;
+
+		const int tz = FixedMul(FixedDiv(r_depthvisibility,
+			abs(planeheight)), rowDistance << FRACBITS);
+		const int shadeIndex = GETPALOOKUP(tz, shade);
+		if(!OF_WolfGPU_DrawSpan(vbuf + y * (int)vbufPitch, viewwidth,
+			tex, 64, 64, -gv >> 2, gu >> 2, -dv >> 2, du >> 2,
+			shadeIndex))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool R_DrawPlaneBackdropHalfGPU(byte *vbuf, unsigned vbufPitch,
+	int yStart, int yEnd, int horizon, fixed planeheight, bool floor,
+	byte solidColor, bool solid, FTexture *texture)
+{
+	if(solid)
+	{
+		return R_ClearSolidBackdropHalfGPU(vbuf, vbufPitch, yStart, yEnd,
+			horizon, planeheight, solidColor);
+	}
+	if(R_DrawTexturedBackdropHalfGPU(vbuf, vbufPitch, yStart, yEnd,
+		horizon, planeheight, floor, texture))
+	{
+		return true;
+	}
+
+	byte fallbackColor;
+	if(R_TextureFirstColor(texture, fallbackColor))
+	{
+		return R_ClearSolidBackdropHalfGPU(vbuf, vbufPitch, yStart, yEnd,
+			horizon, planeheight, fallbackColor);
+	}
+	return false;
+}
+
+bool DrawFloorAndCeilingBackdropGPU(byte *vbuf, unsigned vbufPitch)
+{
+	if(!OF_WolfGPU_IsActive() || map == NULL || map->NumPlanes() == 0)
+		return false;
+
+	byte floorColor;
+	byte ceilingColor;
+	bool solidFloor = R_GetUniformPlaneSolidColor(true, floorColor) ||
+		R_GetDefaultPlaneSolidColor(true, floorColor);
+	bool solidCeiling = R_GetUniformPlaneSolidColor(false, ceilingColor) ||
+		R_GetDefaultPlaneSolidColor(false, ceilingColor);
+
+	FTexture *floorTexture = solidFloor ? NULL : R_GetDefaultPlaneTexture(true);
+	FTexture *ceilingTexture = solidCeiling ? NULL :
+		R_GetDefaultPlaneTexture(false);
+
+	int horizon = (viewheight >> 1) - viewshift;
+	if(horizon < 0)
+		horizon = 0;
+	if(horizon > viewheight)
+		horizon = viewheight;
+
+	if(!R_DrawPlaneBackdropHalfGPU(vbuf, vbufPitch, 0, horizon, horizon,
+		viewz + (map->GetPlane(0).depth << FRACBITS), false,
+		ceilingColor, solidCeiling, ceilingTexture))
+	{
+		return false;
+	}
+	return R_DrawPlaneBackdropHalfGPU(vbuf, vbufPitch, horizon, viewheight,
+		horizon, viewz, true, floorColor, solidFloor, floorTexture);
+}
+#else
+bool DrawFloorAndCeilingBackdropGPU(byte *, unsigned)
+{
+	return false;
+}
+#endif
+
 static void R_DrawSolidPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight,
 	int halfheight, fixed planeheight, byte baseColor)
 {
@@ -226,12 +414,12 @@ static void R_DrawSolidPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight,
 
 			if(x > start)
 			{
-#if defined(OF_ECWOLF_GPU_FLOORCEILING) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 				if(OF_WolfGPU_IsActive())
 				{
 					if(OF_WolfGPU_ClearSpan(tex_offset + start, x - start, rowColor))
 						continue;
-					OF_WolfGPU_FallbackToCPU();
+					continue;
 				}
 #endif
 				memset(tex_offset + start, rowColor, x - start);
@@ -239,119 +427,6 @@ static void R_DrawSolidPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight,
 		}
 	}
 }
-
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-static byte R_ShadeSolidPlaneRow(fixed planeheight, int rowDistance,
-	byte baseColor)
-{
-	if(rowDistance <= 0)
-		rowDistance = 1;
-
-	const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
-	const int tz = FixedMul(FixedDiv(r_depthvisibility, abs(planeheight)),
-		rowDistance << FRACBITS);
-	const int shadeIndex = GETPALOOKUP(tz, shade);
-	return NormalLight.Maps[(shadeIndex << 8) + baseColor];
-}
-
-static bool R_ClearSolidBackdropHalfGPU(byte *vbuf, unsigned vbufPitch,
-	int yStart, int yEnd, int horizon, fixed planeheight, byte baseColor)
-{
-	if(planeheight == 0 || yStart >= yEnd)
-		return true;
-
-	int runY = yStart;
-	byte runColor = 0;
-	bool haveRun = false;
-
-	for(int y = yStart; y < yEnd; ++y)
-	{
-		const int rowDistance = y < horizon ? horizon - y : y - horizon + 1;
-		const byte rowColor =
-			R_ShadeSolidPlaneRow(planeheight, rowDistance, baseColor);
-
-		if(!haveRun)
-		{
-			runY = y;
-			runColor = rowColor;
-			haveRun = true;
-			continue;
-		}
-
-		if(rowColor == runColor)
-			continue;
-
-		if(!OF_WolfGPU_ClearRect(vbuf + runY * (int)vbufPitch, viewwidth,
-			y - runY, runColor))
-		{
-			return false;
-		}
-		runY = y;
-		runColor = rowColor;
-	}
-
-	if(haveRun)
-	{
-		if(!OF_WolfGPU_ClearRect(vbuf + runY * (int)vbufPitch, viewwidth,
-			yEnd - runY, runColor))
-		{
-			return false;
-		}
-	}
-	return true;
-}
-
-bool DrawFloorAndCeilingBackdropFastGPU(byte *vbuf, unsigned vbufPitch)
-{
-	if(!OF_WolfGPU_IsActive())
-		return false;
-
-	byte floorColor;
-	byte ceilingColor;
-	const bool uniformFloor = R_GetUniformPlaneSolidColor(true, floorColor);
-	const bool uniformCeiling = R_GetUniformPlaneSolidColor(false, ceilingColor);
-	if(!uniformFloor || !uniformCeiling)
-	{
-		if(!IWad::CheckGameFilter("Wolf3D") ||
-			!R_GetDefaultPlaneSolidColor(true, floorColor) ||
-			!R_GetDefaultPlaneSolidColor(false, ceilingColor))
-		{
-			return false;
-		}
-
-		static bool loggedDefaultBackdrop;
-		if(!loggedDefaultBackdrop)
-		{
-			printf("OpenFPGA GPU: using default solid Wolf3D floor/ceiling backdrop.\n");
-			loggedDefaultBackdrop = true;
-		}
-	}
-
-	const int halfheight = (viewheight >> 1) - viewshift;
-	if(halfheight <= 0 || halfheight >= viewheight)
-		return false;
-
-	if(!R_ClearSolidBackdropHalfGPU(vbuf, vbufPitch, 0, halfheight,
-		halfheight, viewz + (map->GetPlane(0).depth << FRACBITS),
-		ceilingColor))
-	{
-		OF_WolfGPU_FallbackToCPU();
-		return false;
-	}
-	if(!R_ClearSolidBackdropHalfGPU(vbuf, vbufPitch, halfheight,
-		viewheight, halfheight, viewz, floorColor))
-	{
-		OF_WolfGPU_FallbackToCPU();
-		return false;
-	}
-	return true;
-}
-#else
-bool DrawFloorAndCeilingBackdropFastGPU(byte *, unsigned)
-{
-	return false;
-}
-#endif
 
 static void R_DrawPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight, int halfheight, fixed planeheight)
 {
@@ -428,7 +503,7 @@ static void R_DrawPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight, int 
 		const int shadeIndex = GETPALOOKUP(tz, shade);
 		curshades = &NormalLight.Maps[shadeIndex<<8];
 
-#if defined(OF_ECWOLF_GPU_FLOORCEILING) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 		bool gpuActive = OF_WolfGPU_IsActive();
 		bool gpuSpanActive = false;
 		byte *gpuSpanDest = NULL;
@@ -446,7 +521,6 @@ static void R_DrawPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight, int 
 				64, 64, gpuSpanS, gpuSpanT, gpuSpanSStep, gpuSpanTStep,
 				shadeIndex))
 			{
-				OF_WolfGPU_FallbackToCPU();
 				gpuActive = false;
 			}
 			gpuSpanActive = false;
@@ -492,7 +566,7 @@ static void R_DrawPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight, int 
 
 				if(tex)
 				{
-#if defined(OF_ECWOLF_GPU_FLOORCEILING) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 					if(gpuActive && useOptimized && !isMasked)
 					{
 						if(!gpuSpanActive || gpuSpanTex != tex)
@@ -511,6 +585,9 @@ static void R_DrawPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight, int 
 						continue;
 					}
 					flushGpuSpan();
+					gu += du;
+					gv += dv;
+					continue;
 #endif
 					unsigned texoffs;
 					if(useOptimized)
@@ -536,14 +613,14 @@ static void R_DrawPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight, int 
 						*tex_offset = curshades[tex[texoffs]];
 					}
 				}
-#if defined(OF_ECWOLF_GPU_FLOORCEILING) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 				else
 				{
 					flushGpuSpan();
 				}
 #endif
 			}
-#if defined(OF_ECWOLF_GPU_FLOORCEILING) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 			else
 			{
 				flushGpuSpan();
@@ -552,7 +629,7 @@ static void R_DrawPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight, int 
 			gu += du;
 			gv += dv;
 		}
-#if defined(OF_ECWOLF_GPU_FLOORCEILING) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 		flushGpuSpan();
 #endif
 	}

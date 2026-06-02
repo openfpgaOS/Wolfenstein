@@ -670,7 +670,7 @@ void APlayerPawn::Cmd_Use()
 =============================================================================
 */
 
-player_t::player_t() : FOV(90), DesiredFOV(90), bob(0), attackheld(false)
+player_t::player_t() : FOV(90), DesiredFOV(90), bob(0), oldbob(0), attackheld(false)
 {
 }
 
@@ -706,8 +706,8 @@ void player_t::BobWeapon (fixed *x, fixed *y)
 	fixed rangey = weapon->BobRangeY;
 
 	// Bob the weapon based on movement speed.
-	int angle = (bobspeed*35/TICRATE*gamestate.TimeCount)&FINEMASK;
-	fixed curbob = (flags & PF_WEAPONBOBBING) ? bob : 0;
+	int angle = ((int)R_InterpolatedTimeMul(bobspeed*35/TICRATE))&FINEMASK;
+	fixed curbob = (flags & PF_WEAPONBOBBING) ? R_InterpolateFixed(oldbob, bob) : 0;
 
 	if (curbob != 0)
 	{
@@ -939,6 +939,7 @@ void player_t::Reborn()
 	flags = 0;
 	FOV = DesiredFOV;
 	RespawnEligible = -1;
+	oldbob = bob;
 
 	if(state == PST_ENTER)
 	{
@@ -1000,6 +1001,7 @@ void player_t::Serialize(FArchive &arc)
 		mo->SetupWeaponSlots();
 		CalcProjection(mo->radius);
 		DeathFadeClear();
+		oldbob = bob;
 	}
 }
 

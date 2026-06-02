@@ -117,6 +117,10 @@ class AActor : public Thinker,
 		virtual void	PostBeginPlay() {}
 		void			RemoveFromWorld();
 		virtual void	RemoveInventory(AInventory *item);
+		void			SnapshotRenderState();
+		static void		SnapshotRenderStates();
+		void			SyncRenderState();
+		static void		SyncRenderStates();
 		void			Serialize(FArchive &arc);
 		void			SetIdle();
 		void			SetState(const Frame *state, bool norun=false);
@@ -171,6 +175,8 @@ class AActor : public Thinker,
 
 		angle_t	angle;
 		angle_t pitch;
+		fixed	oldx, oldy, oldz;
+		angle_t	oldangle, oldpitch;
 		int32_t	health;
 		int32_t	speed, runspeed;
 		int		points;

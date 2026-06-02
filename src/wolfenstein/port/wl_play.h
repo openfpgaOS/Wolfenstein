@@ -18,8 +18,38 @@
 
 extern  bool noadaptive;
 extern  unsigned        tics;
+extern  fixed           renderfraction;
+extern  int32_t         renderbasetimecount;
 extern  int             viewsize;
 extern unsigned short Paused;
+
+static inline fixed R_InterpolateFixed(fixed oldvalue, fixed value)
+{
+	return oldvalue + FixedMul(value - oldvalue, renderfraction);
+}
+
+static inline angle_t R_InterpolateAngle(angle_t oldvalue, angle_t value)
+{
+	const int32_t diff = (int32_t)(value - oldvalue);
+	return oldvalue + (angle_t)(((int64_t)diff * renderfraction) >> FRACBITS);
+}
+
+static inline int64_t R_InterpolatedTimeScaled(int shift)
+{
+	return ((int64_t)renderbasetimecount << shift) +
+		(((int64_t)renderfraction << shift) >> FRACBITS);
+}
+
+static inline int64_t R_InterpolatedTimeMul(int multiplier)
+{
+	return (int64_t)renderbasetimecount * multiplier +
+		(((int64_t)renderfraction * multiplier) >> FRACBITS);
+}
+
+static inline real64 R_InterpolatedTimeCount()
+{
+	return (real64)renderbasetimecount + (real64)renderfraction / (real64)FRACUNIT;
+}
 
 //
 // current user input

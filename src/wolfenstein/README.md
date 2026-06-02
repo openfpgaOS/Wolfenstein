@@ -74,35 +74,19 @@ The OpenFPGA build defaults saved/loaded config to `ViewSize=21`, so gameplay
 uses this full-screen path instead of ECWolf's smaller viewport plus CPU status
 bar redraw.
 
-The fast wall renderer is the default for classic 64-unit ECWolf maps and
-compatible mods. It supports normal walls, doors, slide offsets, moving
-pushwalls, animated textures, and texture replacements that keep power-of-two
-column-major paletted wall data. If a map or texture cannot use that path the
-engine logs `OpenFPGA fast renderer: fallback (...)` and uses ECWolf's generic
-wall renderer instead. Classic solid floor/ceiling planes are filled as two GPU
-rect clears before walls, and sprite/weapon masked columns also use the GPU by
-default. Normal full-screen gameplay keeps that GPU work queued until the
-direct video-frame present, avoiding a CPU-visible framebuffer sync in the
-middle of the frame. Parallax sky and textured floor/ceiling spans also run on
-the GPU by default (`OF_ECWOLF_GPU_SKY` / `OF_ECWOLF_GPU_FLOORCEILING`); classic
-solid floors/ceilings already fill via GPU rect-clears regardless, and stock
-Wolf3D/Spear do not exercise the sky/textured-floor paths. The app uses a 320x240 APF framebuffer
-for direct triple buffering, with the 320x200 Wolfenstein gameplay viewport
-centered vertically inside it. The 320x240 scaler mode is marked 10:9 so the
-centered 320x200 viewport displays at the original 4:3 game aspect.
+Gameplay uses ECWolf's canonical wall traversal and submits eligible wall,
+sky, floor/ceiling, sprite, and weapon spans to the OpenFPGA GPU. This keeps
+the complicated map/door/pushwall behavior in one renderer while still using
+the hardware span path for the expensive pixel work. Normal full-screen
+gameplay keeps GPU work queued until the direct video-frame present, avoiding a
+CPU-visible framebuffer sync in the middle of the frame. The app uses a 320x240
+APF framebuffer for direct triple buffering, with the 320x200 Wolfenstein
+gameplay viewport centered vertically inside it. The 320x240 scaler mode is
+marked 10:9 so the centered 320x200 viewport displays at the original 4:3 game
+aspect.
 
-GPU build flags:
-
-- `OF_ECWOLF_FAST_RENDERER`: use the Wolfenstein-specific fast wall raycaster (default)
-- `OF_ECWOLF_GPU_WALLS`: send wall columns through the GPU wrapper (default)
-- `OF_ECWOLF_GPU_SPRITES`: send sprite and weapon columns through the GPU wrapper (default)
-- `OF_ECWOLF_GPU_PRESENT`: present through SDK triple buffering (default)
-- `OF_ECWOLF_GPU_SKY`: send supported sky columns through the GPU wrapper (default)
-- `OF_ECWOLF_GPU_FLOORCEILING`: send floor/ceiling spans through the GPU wrapper (default)
-- `OF_ECWOLF_DIRECT_FRAMEBUFFER`: force the direct framebuffer path for profiling
-- `OF_ECWOLF_PROFILE_FRAME`: print average wall/sky/floor/sprite frame timings (debug only)
-- `OF_ECWOLF_GPU_NO_REGION_SYNC`: revert to the old per-fallback whole-frame GPU
-  drain/invalidate instead of region-scoped coherence (see below)
+The OpenFPGA build always enables direct GPU video presentation and the GPU
+span renderer.
 
 ### GPU/CPU coherence (region sync)
 
@@ -125,10 +109,7 @@ forced the rest of the frame onto the CPU and a whole-frame flush at present.
 Base Wolf3D/Spear content keeps all walls/floor/sprites/weapon on the GPU and
 never falls back, so it stays on the fully asynchronous present path.
 
-Build with `-DOF_ECWOLF_GPU_NO_REGION_SYNC` to revert to the old whole-frame
-behavior if a hardware regression is suspected, and use `OF_ECWOLF_PROFILE_FRAME`
-to compare per-stage frame timings. This path is compile-verified but has not
-yet been validated on hardware.
+This path is compile-verified but has not yet been validated on hardware.
 
 ## Saves
 

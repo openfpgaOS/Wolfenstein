@@ -70,6 +70,7 @@ class StateLabel
 class CallArguments
 {
 	public:
+		CallArguments() : hasExpression(false) {}
 		class Value
 		{
 			public:
@@ -96,10 +97,12 @@ class CallArguments
 
 		void		AddArgument(const Value &val);
 		int			Count() const { return args.Size(); }
+		bool		NeedsEvaluation() const { return hasExpression; }
 		void		Evaluate(AActor *self);
 		const Value	&operator[] (unsigned int idx) const { return args[idx]; }
 	private:
 		TArray<Value> args;
+		bool hasExpression;
 };
 
 class ActionInfo

@@ -228,6 +228,9 @@ class GameMap
 					sideSolidNorth(true), sideSolidWest(true), sideSolidSouth(true)
 				{
 					slideAmount[0] = slideAmount[1] = slideAmount[2] = slideAmount[3] = 0;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+					visibleStamp = 0;
+#endif
 				}
 				~Map()
 				{
@@ -247,6 +250,22 @@ class GameMap
 				Map				*GetNextTag() const;
 				void			SetTag(unsigned int tag);
 				void			SetNextTag(Map *next);
+				bool			IsVisible() const
+				{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+					return visibleStamp == plane->gm->visibilityStamp;
+#else
+					return visible != 0;
+#endif
+				}
+				void			MarkVisible()
+				{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+					visibleStamp = plane->gm->visibilityStamp;
+#else
+					visible = true;
+#endif
+				}
 				bool			IsSideSolid(unsigned int side) const;
 				void			SetSideSolid(unsigned int side, bool solid);
 				void			SetAllSidesSolid(bool solid);
@@ -272,6 +291,9 @@ class GameMap
 				unsigned int	sideSolidNorth:1;
 				unsigned int	sideSolidWest:1;
 				unsigned int	sideSolidSouth:1;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+				unsigned int	visibleStamp;
+#endif
 			}*	map;
 		};
 		struct PlayerSpawn
@@ -349,6 +371,9 @@ class GameMap
 		TArray<Thing>	things;
 		TArray<Plane>	planes;
 		TMap<unsigned int, Plane::Map *> tagMap;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		unsigned int		visibilityStamp;
+#endif
 
 		// Sound travel links.  zoneTraversed is temporary array for recursive
 		// traversals.  zoneLinks is the table of links (counts the number of

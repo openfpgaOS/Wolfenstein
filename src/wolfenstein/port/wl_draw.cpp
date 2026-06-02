@@ -30,24 +30,11 @@
 #include "a_inventory.h"
 #include "thingdef/thingdef.h"
 #include "of_ecwolf_gpu.h"
-#include "of_ecwolf_fast_renderer.h"
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 #include "of_video.h"
-#endif
-
-#if defined(OF_ECWOLF_GPU_WALLS) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 #define OF_ECWOLF_WALL_GPU_ENABLED 1
-#endif
-
-#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 #define OF_ECWOLF_SPRITE_GPU_ENABLED 1
-#endif
-
-#if defined(OF_ECWOLF_GPU_FLOORCEILING) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 #define OF_ECWOLF_FLOOR_GPU_ENABLED 1
-#endif
-
-#if defined(OF_ECWOLF_GPU_SKY) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 #define OF_ECWOLF_SKY_GPU_ENABLED 1
 #endif
 
@@ -77,8 +64,8 @@
 =============================================================================
 */
 
+bool DrawFloorAndCeilingBackdropGPU(byte *vbuf, unsigned vbufPitch);
 void DrawFloorAndCeiling(byte *vbuf, unsigned vbufPitch, int min_wallheight);
-bool DrawFloorAndCeilingBackdropFastGPU(byte *vbuf, unsigned vbufPitch);
 void DrawParallax(byte *vbuf, unsigned vbufPitch);
 bool HasParallax(void);
 
@@ -205,12 +192,14 @@ fixed	texyscale = FRACUNIT;
 void TransformActor (AActor *ob)
 {
 	fixed gx,gy,gxt,gyt,nx,ny;
+	const fixed obx = R_InterpolateFixed(ob->oldx, ob->x);
+	const fixed oby = R_InterpolateFixed(ob->oldy, ob->y);
 
 //
 // translate point to view centered coordinates
 //
-	gx = ob->x-viewx;
-	gy = ob->y-viewy;
+	gx = obx-viewx;
+	gy = oby-viewy;
 
 //
 // calculate newx
@@ -284,6 +273,29 @@ int CalcHeight()
 const byte *postsource;
 int postx;
 
+static const byte *WallTextureColumn(FTexture *texture, int texcoord)
+{
+	if(texture == NULL || texxscale <= 0)
+		return NULL;
+
+	const int width = texture->GetWidth();
+	const int height = texture->GetHeight();
+	const byte *pixels = texture->GetPixels();
+	if(width <= 0 || height <= 0 || pixels == NULL)
+		return NULL;
+
+#if defined(OF_ECWOLF_WALL_GPU_ENABLED)
+	OF_WolfGPU_PreloadSource(pixels, (uint32_t)(width * height));
+#endif
+
+	int column = texcoord / texxscale;
+	if(column < 0)
+		column = 0;
+	if(column >= width)
+		column %= width;
+	return pixels + column * height;
+}
+
 void ScalePost()
 {
 	if(postsource == NULL)
@@ -346,9 +358,11 @@ void ScalePost()
 			{
 				return;
 			}
-			OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, vbufPitch);
 		}
 	}
+#endif
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	return;
 #endif
 
 	col = curshades[postsource[yw]];
@@ -478,7 +492,7 @@ void HitVertWall (void)
 		texyscale = source->yScale>>(FRACBITS-8);
 		texture -= texture%texxscale;
 
-		postsource = source->GetColumn(texture/texxscale, NULL);
+		postsource = WallTextureColumn(source, texture);
 	}
 	else
 		postsource = NULL;
@@ -552,7 +566,7 @@ void HitHorizWall (void)
 		texyscale = source->yScale>>(FRACBITS-8);
 		texture -= texture%texxscale;
 
-		postsource = source->GetColumn(texture/texxscale, NULL);
+		postsource = WallTextureColumn(source, texture);
 	}
 	else
 		postsource = NULL;
@@ -577,14 +591,14 @@ void HitHorizWall (void)
 
 unsigned int CalcRotate (AActor *ob)
 {
-	angle_t angle, viewangle;
+	angle_t angle, spriteangle;
 
 	// this isn't exactly correct, as it should vary by a trig value,
 	// but it is close enough with only eight rotations
 
-	viewangle = players[ConsolePlayer].camera->angle + (centerx - ob->viewx)/8;
+	spriteangle = viewangle + (centerx - ob->viewx)/8;
 
-	angle = viewangle - ob->angle;
+	angle = spriteangle - R_InterpolateAngle(ob->oldangle, ob->angle);
 
 	angle+= ANGLE_180 + ANGLE_45/2;
 
@@ -617,6 +631,49 @@ typedef struct
 visobj_t vislist[MAXVISABLE];
 visobj_t *visptr,*visstep,*farthest;
 
+static inline bool IsOpenVisibleSpot(MapSpot spot)
+{
+	return spot->IsVisible() && !spot->tile;
+}
+
+static inline bool IsActorSpotVisible(MapSpot spot)
+{
+	if(spot->IsVisible())
+		return true;
+
+	const unsigned int width = mapwidth;
+	const unsigned int height = mapheight;
+	const unsigned int x = spot->GetX();
+	const unsigned int y = spot->GetY();
+
+	if(x + 1 < width)
+	{
+		MapSpot east = spot + 1;
+		if(IsOpenVisibleSpot(east))
+			return true;
+		if(y > 0 && IsOpenVisibleSpot(east - width))
+			return true;
+		if(y + 1 < height && IsOpenVisibleSpot(east + width))
+			return true;
+	}
+	if(y > 0 && IsOpenVisibleSpot(spot - width))
+		return true;
+	if(x > 0)
+	{
+		MapSpot west = spot - 1;
+		if(IsOpenVisibleSpot(west))
+			return true;
+		if(y > 0 && IsOpenVisibleSpot(west - width))
+			return true;
+		if(y + 1 < height && IsOpenVisibleSpot(west + width))
+			return true;
+	}
+	if(y + 1 < height && IsOpenVisibleSpot(spot + width))
+		return true;
+
+	return false;
+}
+
 void DrawScaleds (void)
 {
 	int      i,least,numvisable,height;
@@ -634,28 +691,11 @@ void DrawScaleds (void)
 			continue;
 
 		MapSpot spot = map->GetSpot(obj->tilex, obj->tiley, 0);
-		MapSpot spots[8];
-		spots[0] = spot->GetAdjacent(MapTile::East);
-		spots[1] = spots[0] ? spots[0]->GetAdjacent(MapTile::North) : NULL;
-		spots[2] = spot->GetAdjacent(MapTile::North);
-		spots[3] = spots[2] ? spots[2]->GetAdjacent(MapTile::West) : NULL;
-		spots[4] = spot->GetAdjacent(MapTile::West);
-		spots[5] = spots[4] ? spots[4]->GetAdjacent(MapTile::South) : NULL;
-		spots[6] = spot->GetAdjacent(MapTile::South);
-		spots[7] = spots[6] ? spots[6]->GetAdjacent(MapTile::East) : NULL;
 
 		//
 		// could be in any of the nine surrounding tiles
 		//
-		if (spot->visible
-			|| ( spots[0] && (spots[0]->visible && !spots[0]->tile) )
-			|| ( spots[1] && (spots[1]->visible && !spots[1]->tile) )
-			|| ( spots[2] && (spots[2]->visible && !spots[2]->tile) )
-			|| ( spots[3] && (spots[3]->visible && !spots[3]->tile) )
-			|| ( spots[4] && (spots[4]->visible && !spots[4]->tile) )
-			|| ( spots[5] && (spots[5]->visible && !spots[5]->tile) )
-			|| ( spots[6] && (spots[6]->visible && !spots[6]->tile) )
-			|| ( spots[7] && (spots[7]->visible && !spots[7]->tile) ) )
+		if (IsActorSpotVisible(spot))
 		{
 			TransformActor (obj);
 			if (!obj->viewheight || (gamestate.victoryflag && obj == players[ConsolePlayer].mo))
@@ -987,7 +1027,7 @@ vertentry:
 				break;
 			}
 passvert:
-			tilehit->visible=true;
+			tilehit->MarkVisible();
 			tilehit->amFlags |= AM_Visible;
 			xtile+=xtilestep;
 			yintercept+=ystep;
@@ -1154,7 +1194,7 @@ horizentry:
 				break;
 			}
 passhoriz:
-			tilehit->visible=true;
+			tilehit->MarkVisible();
 			tilehit->amFlags |= AM_Visible;
 			ytile+=ytilestep;
 			xintercept+=xstep;
@@ -1173,6 +1213,26 @@ passhoriz:
 ====================
 */
 
+static void CalcViewVerticals()
+{
+	AActor *camera = players[ConsolePlayer].camera;
+	viewshift = FixedMul(focallengthy,
+		finetangent[(ANGLE_180 + R_InterpolateAngle(camera->oldpitch, camera->pitch)) >>
+			ANGLETOFINESHIFT]);
+
+	const angle_t bobangle =
+		(angle_t)(R_InterpolatedTimeScaled(13) / (20 * TICRATE / 35)) & FINEMASK;
+	const fixed playerMovebob =
+		players[ConsolePlayer].mo->GetClass()->Meta.GetMetaFixed(APMETA_MoveBob);
+	const fixed playerbob = R_InterpolateFixed(players[ConsolePlayer].oldbob,
+		players[ConsolePlayer].bob);
+	const fixed curbob = gamestate.victoryflag ? 0 :
+		FixedMul(FixedMul(playerbob, playerMovebob) >> 1,
+			finesine[bobangle]);
+
+	viewz = curbob - players[ConsolePlayer].mo->viewheight;
+}
+
 void WallRefresh (void)
 {
 	xpartialdown = viewx&(TILEGLOBAL-1);
@@ -1182,14 +1242,6 @@ void WallRefresh (void)
 
 	min_wallheight = viewheight;
 	lastside = -1;                  // the first pixel is on a new wall
-	viewshift = FixedMul(focallengthy, finetangent[(ANGLE_180+players[ConsolePlayer].camera->pitch)>>ANGLETOFINESHIFT]);
-
-	
-	angle_t bobangle = ((gamestate.TimeCount<<13)/(20*TICRATE/35)) & FINEMASK;
-	const fixed playerMovebob = players[ConsolePlayer].mo->GetClass()->Meta.GetMetaFixed(APMETA_MoveBob);
-	fixed curbob = gamestate.victoryflag ? 0 : FixedMul(FixedMul(players[ConsolePlayer].bob, playerMovebob)>>1, finesine[bobangle]);
-
-	viewz = curbob - players[ConsolePlayer].mo->viewheight;
 
 	AsmRefresh();
 	ScalePost ();                   // no more optimization on last post
@@ -1197,21 +1249,25 @@ void WallRefresh (void)
 
 void CalcViewVariables()
 {
-	viewangle = players[ConsolePlayer].camera->angle;
+	AActor *camera = players[ConsolePlayer].camera;
+	const fixed camerax = R_InterpolateFixed(camera->oldx, camera->x);
+	const fixed cameray = R_InterpolateFixed(camera->oldy, camera->y);
+
+	viewangle = R_InterpolateAngle(camera->oldangle, camera->angle);
 	midangle = viewangle>>ANGLETOFINESHIFT;
 	viewsin = finesine[viewangle>>ANGLETOFINESHIFT];
 	viewcos = finecosine[viewangle>>ANGLETOFINESHIFT];
-	viewx = players[ConsolePlayer].camera->x - FixedMul(focallength,viewcos);
-	viewy = players[ConsolePlayer].camera->y + FixedMul(focallength,viewsin);
+	viewx = camerax - FixedMul(focallength,viewcos);
+	viewy = cameray + FixedMul(focallength,viewsin);
 
 	focaltx = (short)(viewx>>TILESHIFT);
 	focalty = (short)(viewy>>TILESHIFT);
 
-	viewtx = (short)(players[ConsolePlayer].camera->x >> TILESHIFT);
-	viewty = (short)(players[ConsolePlayer].camera->y >> TILESHIFT);
+	viewtx = (short)(camerax >> TILESHIFT);
+	viewty = (short)(cameray >> TILESHIFT);
 
-	if(players[ConsolePlayer].camera->player)
-		r_extralight = players[ConsolePlayer].camera->player->extralight << 3;
+	if(camera->player)
+		r_extralight = camera->player->extralight << 3;
 	else
 		r_extralight = 0;
 }
@@ -1243,35 +1299,20 @@ void ThreeDStartFadeIn()
 
 void R_RenderView()
 {
-#if defined(OF_ECWOLF_PROFILE_FRAME)
-	const uint32_t profileFrameStart = SDL_GetTicks();
-	uint32_t profileStageStart = profileFrameStart;
-	uint32_t profileWallMs = 0;
-	uint32_t profileSkyMs = 0;
-	uint32_t profileFloorMs = 0;
-	uint32_t profileSpriteMs = 0;
-#endif
-	bool fastBackdrop = false;
 	const bool hasParallax = HasParallax();
+	bool gpuBackdrop = false;
 
+	uint32_t perfStart = OF_WolfPerf_NowUS();
 	CalcViewVariables();
-	viewshift = FixedMul(focallengthy,
-		finetangent[(ANGLE_180 + players[ConsolePlayer].camera->pitch) >>
-			ANGLETOFINESHIFT]);
-	{
-		const angle_t bobangle =
-			((gamestate.TimeCount << 13) / (20 * TICRATE / 35)) & FINEMASK;
-		const fixed playerMovebob =
-			players[ConsolePlayer].mo->GetClass()->Meta.GetMetaFixed(APMETA_MoveBob);
-		const fixed curbob = gamestate.victoryflag ? 0 :
-			FixedMul(FixedMul(players[ConsolePlayer].bob, playerMovebob) >> 1,
-				finesine[bobangle]);
-		viewz = curbob - players[ConsolePlayer].mo->viewheight;
-	}
-
-#if defined(OF_ECWOLF_WALL_GPU_ENABLED)
+	CalcViewVerticals();
+	OF_WolfPerf_Add(OF_WOLF_PERF_VIEW_SETUP, perfStart);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	if(!hasParallax)
-		fastBackdrop = DrawFloorAndCeilingBackdropFastGPU(vbuf, vbufPitch);
+	{
+		perfStart = OF_WolfPerf_NowUS();
+		gpuBackdrop = DrawFloorAndCeilingBackdropGPU(vbuf, vbufPitch);
+		OF_WolfPerf_Add(OF_WOLF_PERF_FLOORCEIL, perfStart);
+	}
 #endif
 
 //
@@ -1282,54 +1323,37 @@ void R_RenderView()
 		DrawStarSky(vbuf, vbufPitch);
 #endif
 
-	if(!OF_WolfFastRenderer_RenderWalls(vbuf, vbufPitch))
-		WallRefresh ();
-#if defined(OF_ECWOLF_WALL_GPU_ENABLED) && !defined(OF_ECWOLF_SKY_GPU_ENABLED)
-	if(hasParallax || !fastBackdrop)
-		OF_WolfGPU_EndFrame();
-#endif
-#if defined(OF_ECWOLF_PROFILE_FRAME)
-	{
-		const uint32_t now = SDL_GetTicks();
-		profileWallMs = now - profileStageStart;
-		profileStageStart = now;
-	}
-#endif
+	perfStart = OF_WolfPerf_NowUS();
+	WallRefresh ();
+	OF_WolfPerf_Add(OF_WOLF_PERF_WALLS, perfStart);
 
 	if(hasParallax)
-		DrawParallax(vbuf, vbufPitch);
-#if defined(OF_ECWOLF_PROFILE_FRAME)
 	{
-		const uint32_t now = SDL_GetTicks();
-		profileSkyMs = now - profileStageStart;
-		profileStageStart = now;
+		perfStart = OF_WolfPerf_NowUS();
+		DrawParallax(vbuf, vbufPitch);
+		OF_WolfPerf_Add(OF_WOLF_PERF_SKY, perfStart);
 	}
-#endif
 #if 0 // USE_CLOUDSKY
 	if(GetFeatureFlags() & FF_CLOUDSKY)
 		DrawClouds(vbuf, vbufPitch, min_wallheight);
 #endif
-	if(!fastBackdrop)
+	if(!gpuBackdrop)
+	{
+		perfStart = OF_WolfPerf_NowUS();
 		DrawFloorAndCeiling(vbuf, vbufPitch, min_wallheight);
+		OF_WolfPerf_Add(OF_WOLF_PERF_FLOORCEIL, perfStart);
+	}
 #if defined(OF_ECWOLF_SPRITE_GPU_ENABLED)
 	if(!OF_WolfGPU_IsActive())
 		OF_WolfGPU_BeginFrame(vbuf, vbufPitch, viewheight);
-#elif defined(OF_ECWOLF_WALL_GPU_ENABLED)
-	if(fastBackdrop)
-		OF_WolfGPU_EndFrame();
-#endif
-#if defined(OF_ECWOLF_PROFILE_FRAME)
-	{
-		const uint32_t now = SDL_GetTicks();
-		profileFloorMs = now - profileStageStart;
-		profileStageStart = now;
-	}
 #endif
 
 //
 // draw all the scaled images
 //
+	perfStart = OF_WolfPerf_NowUS();
 	DrawScaleds();                  // draw scaled stuff
+	OF_WolfPerf_Add(OF_WOLF_PERF_SPRITES, perfStart);
 
 #if 0 // USE_RAIN
 	if(GetFeatureFlags() & FF_RAIN)
@@ -1340,50 +1364,21 @@ void R_RenderView()
 		DrawSnow(vbuf, vbufPitch);
 #endif
 
+	perfStart = OF_WolfPerf_NowUS();
 	DrawPlayerWeapon ();    // draw player's hands
-#if defined(OF_ECWOLF_PROFILE_FRAME)
-	{
-		static uint32_t totalFrames;
-		static uint32_t totalWallMs;
-		static uint32_t totalSkyMs;
-		static uint32_t totalFloorMs;
-		static uint32_t totalSpriteMs;
-		static uint32_t totalFrameMs;
+	OF_WolfPerf_Add(OF_WOLF_PERF_WEAPON, perfStart);
 
-		const uint32_t now = SDL_GetTicks();
-		profileSpriteMs = now - profileStageStart;
-
-		totalFrames++;
-		totalWallMs += profileWallMs;
-		totalSkyMs += profileSkyMs;
-		totalFloorMs += profileFloorMs;
-		totalSpriteMs += profileSpriteMs;
-		totalFrameMs += now - profileFrameStart;
-		if(totalFrames >= 30)
-		{
-			printf("Frame profile: total=%lu wall=%lu sky=%lu floor=%lu sprites=%lu ms/frame\n",
-				(unsigned long)(totalFrameMs / totalFrames),
-				(unsigned long)(totalWallMs / totalFrames),
-				(unsigned long)(totalSkyMs / totalFrames),
-				(unsigned long)(totalFloorMs / totalFrames),
-				(unsigned long)(totalSpriteMs / totalFrames));
-			totalFrames = 0;
-			totalWallMs = 0;
-			totalSkyMs = 0;
-			totalFloorMs = 0;
-			totalSpriteMs = 0;
-			totalFrameMs = 0;
-		}
-	}
-#endif
-
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	const bool drawStatusOverlay = false;
+#else
 	const bool drawStatusOverlay =
 		(control[ConsolePlayer].buttonstate[bt_showstatusbar] ||
 		 control[ConsolePlayer].buttonheld[bt_showstatusbar]) &&
 		viewsize == 21;
+#endif
 	if(drawStatusOverlay)
 	{
-#if defined(OF_ECWOLF_POSTWALL_GPU_ENABLED)
+#if defined(OF_ECWOLF_POSTWALL_GPU_ENABLED) && !defined(OF_ECWOLF_OPENFPGA)
 		OF_WolfGPU_FallbackToCPU();
 #endif
 		ingame = false;
@@ -1409,8 +1404,6 @@ static bool OF_WolfClearFrameSpan(byte *frameBase, byte *dest, unsigned count,
 {
 	if(count == 0)
 		return true;
-	if(OF_WolfGPU_ClearSpan(dest, (int)count, color))
-		return true;
 	if(frameBase == NULL || dest == NULL || pitch == 0 || height == 0)
 		return false;
 	if(pitch > OF_VIDEO_MAX_STRIDE || height > OF_VIDEO_MAX_HEIGHT)
@@ -1426,8 +1419,21 @@ static bool OF_WolfClearFrameSpan(byte *frameBase, byte *dest, unsigned count,
 		return false;
 	}
 
-	memset(dest, color, count);
-	return true;
+	if(count % pitch == 0)
+	{
+		const unsigned rows = count / pitch;
+		if(OF_WolfGPU_ClearRect(dest, (int)pitch, (int)rows, color))
+			return true;
+		for(unsigned row = 0; row < rows; ++row)
+		{
+			if(!OF_WolfGPU_ClearSpan(dest + row * pitch, (int)pitch, color))
+				return false;
+		}
+		return true;
+	}
+	if(count <= pitch && OF_WolfGPU_ClearSpan(dest, (int)count, color))
+		return true;
+	return false;
 }
 #endif
 
@@ -1441,7 +1447,9 @@ void    ThreeDRefresh (void)
 //
 // clear out the traced array
 //
+	uint32_t perfStart = OF_WolfPerf_NowUS();
 	map->ClearVisibility();
+	OF_WolfPerf_Add(OF_WOLF_PERF_RENDER_MISC, perfStart);
 
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	const unsigned screenWidth = (unsigned)SCREENWIDTH;
@@ -1456,8 +1464,12 @@ void    ThreeDRefresh (void)
 		OF_WolfGPU_SetNextVideoFramePreserve(false);
 	}
 #endif
+	perfStart = OF_WolfPerf_NowUS();
+	VH_AcquireDeferredScreenLock();
 	vbuf = VL_LockSurface();
-	if(vbuf == NULL) return;
+	OF_WolfPerf_Add(OF_WOLF_PERF_RENDER_LOCK, perfStart);
+	if(vbuf == NULL)
+		return;
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	byte *const openfpgaFrameBase = vbuf;
 #endif
@@ -1465,8 +1477,16 @@ void    ThreeDRefresh (void)
 	vbufPitch = SCREENPITCH;
 
 #if defined(OF_ECWOLF_WALL_GPU_ENABLED)
-	OF_WolfGPU_BeginFrame(vbuf, vbufPitch, viewheight);
+	perfStart = OF_WolfPerf_NowUS();
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_WolfGPU_BeginFrame(openfpgaFrameBase, vbufPitch, screenHeight);
+#else
+	OF_WolfGPU_BeginFrame(vbuf, vbufPitch, viewheight);
+#endif
+	OF_WolfPerf_Add(OF_WOLF_PERF_RENDER_BEGIN, perfStart);
+#endif
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	perfStart = OF_WolfPerf_NowUS();
 	if(openfpgaFullRedraw && screenofs != 0 && viewscreenx == 0)
 	{
 		const byte black = GPalette.BlackIndex;
@@ -1504,13 +1524,16 @@ void    ThreeDRefresh (void)
 			}
 		}
 	}
-#endif
+	OF_WolfPerf_Add(OF_WOLF_PERF_RENDER_CLEAR, perfStart);
 #endif
 	R_RenderView();
 
+	perfStart = OF_WolfPerf_NowUS();
 	VL_UnlockSurface();
+	OF_WolfPerf_Add(OF_WOLF_PERF_RENDER_UNLOCK, perfStart);
 	vbuf = NULL;
 
+	perfStart = OF_WolfPerf_NowUS();
 	if(player_t *player = players[ConsolePlayer].camera->player)
 	{
 		if(player->ScreenFader)
@@ -1522,6 +1545,10 @@ void    ThreeDRefresh (void)
 //
 	if (fizzlein)
 	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		fizzlein.Reset();
+		ResetTimeCount();
+#else
 		OF_WolfGPU_FallbackToCPU();
 		while(!fizzlein->Update())
 			VH_UpdateScreen();
@@ -1530,9 +1557,11 @@ void    ThreeDRefresh (void)
 
 		// don't make a big tic count
 		ResetTimeCount();
+#endif
 	}
 	else if (fpscounter)
 	{
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 		OF_WolfGPU_FallbackToCPU();
 		FString fpsDisplay;
 		fpsDisplay.Format("%2u fps", fps);
@@ -1548,6 +1577,7 @@ void    ThreeDRefresh (void)
 		pa = MENU_TOP;
 		VWB_DrawPropString(ConFont, fpsDisplay, CR_WHITE);
 		pa = MENU_CENTER;
+#endif
 	}
 
 	if (fpscounter)
@@ -1562,4 +1592,5 @@ void    ThreeDRefresh (void)
 			fps_frames=0;
 		}
 	}
+	OF_WolfPerf_Add(OF_WOLF_PERF_RENDER_MISC, perfStart);
 }

@@ -1321,6 +1321,8 @@ CallArguments::~CallArguments()
 
 void CallArguments::AddArgument(const CallArguments::Value &val)
 {
+	if(val.isExpression)
+		hasExpression = true;
 	args.Push(val);
 }
 

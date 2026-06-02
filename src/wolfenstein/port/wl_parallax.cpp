@@ -12,7 +12,7 @@
 extern fixed viewz;
 extern int viewshift;
 
-#if defined(OF_ECWOLF_GPU_SKY) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 #define OF_ECWOLF_SKY_GPU_ENABLED 1
 #endif
 
@@ -43,7 +43,7 @@ static void DrawParallaxPlaneLoop(byte *vbuf, unsigned vbufPitch,
 			return;
 		}
 		if(count > 0)
-			OF_WolfGPU_PrepareForCPUAccessColumn(vbuf, count, vbufPitch);
+			return;
 	}
 #endif
 
@@ -66,6 +66,8 @@ static void DrawParallaxPlane(byte *vbuf, unsigned vbufPitch,
 
 	const int w = skysource->GetWidth();
 	const fixed h = (skysource->GetHeight())<<FRACBITS;
+	if(w <= 0 || h <= 0)
+		return;
 	const fixed yStep = h/skyscaledheight;
 
 	const int cycle = skysource->GetScaledHeight() < 100 ? FINEANGLES : MIN(FINEANGLES, FINEANGLES*skysource->GetScaledWidth()/1024);
@@ -81,9 +83,12 @@ static void DrawParallaxPlane(byte *vbuf, unsigned vbufPitch,
 		if(xtex != curtex)
 		{
 			curtex = xtex;
-
-			skytex = skysource->GetColumn(xtex, NULL);
+			const byte *pixels = skysource->GetPixels();
+			skytex = pixels == NULL ? NULL :
+				pixels + (xtex % w) * skysource->GetHeight();
 		}
+		if(skytex == NULL)
+			continue;
 
 		if(ceiling)
 		{
@@ -128,6 +133,10 @@ static void DrawParallaxPlane(byte *vbuf, unsigned vbufPitch,
 
 	FTexture * const skysource = TexMan(skyid);
 	const int skyheight = skysource->GetScaledHeight();
+#if defined(OF_ECWOLF_SKY_GPU_ENABLED)
+	OF_WolfGPU_PreloadSource(skysource->GetPixels(),
+		skysource->GetWidth() * skysource->GetHeight());
+#endif
 
 	// Texel of horizon line
 	int skyhorizon = skyheight; // Wolf4SDL backwards compatibility
@@ -157,10 +166,10 @@ static void DrawParallaxPlane(byte *vbuf, unsigned vbufPitch,
 
 	skyhorizon -= horizonOffset;
 
-		// For a speed of 1 cycle roughly every 30 seconds (roughly in line with ZDoom)
-		const real64 scrollAmount = scrollSpeed * static_cast<real64>(gamestate.TimeCount) * static_cast<real64>(1 << 27) / static_cast<real64>(TICRATE);
-		const angle_t scroll = xs_ToInt(scrollAmount);
-	const int midangle = (players[ConsolePlayer].camera->angle + scroll)>>ANGLETOFINESHIFT;
+	// For a speed of 1 cycle roughly every 30 seconds (roughly in line with ZDoom)
+	const real64 scrollAmount = scrollSpeed * R_InterpolatedTimeCount() * static_cast<real64>(1 << 27) / static_cast<real64>(TICRATE);
+	const angle_t scroll = xs_ToInt(scrollAmount);
+	const int midangle = (viewangle + scroll)>>ANGLETOFINESHIFT;
 	// Position of world horizon line
 	const int horizonheight = (viewheight >> 1) - viewshift;
 	// We want to map the sky onto the upper and lower 100 pixels of the 320x200

@@ -166,7 +166,6 @@ struct of_services_table {
     void      (*mixer_set_group)(int voice, int group);
     void      (*mixer_set_group_volume)(int group, int volume);
     void      (*mixer_set_master_volume)(int volume);
-    void      (*mixer_set_filter)(int voice, int cutoff_q016, int q, int enable);
     int       (*audio_stream_open)(int sample_rate);
     int       (*audio_stream_write)(const int16_t *samples, int count);
     int       (*audio_stream_ready)(void);
@@ -268,10 +267,6 @@ struct of_services_table {
                                        int vol_l,
                                        int vol_r);
     void      (*mixer_set_vol_rate_h)(uint64_t handle, int rate);
-    void      (*mixer_set_filter_h)(uint64_t handle,
-                                    int cutoff_q016,
-                                    int q,
-                                    int enable);
     uint32_t  (*mixer_poll_ended_h)(uint64_t *out_handles,
                                     uint32_t max_handles);
 

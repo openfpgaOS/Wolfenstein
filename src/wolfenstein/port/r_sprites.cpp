@@ -56,6 +56,22 @@
 
 #define TEX_DWNAME(tex) MAKE_ID(tex->Name[0], tex->Name[1], tex->Name[2], tex->Name[3])
 
+static const BYTE *TextureColumnPixels(FTexture *tex, unsigned int column)
+{
+	if(tex == NULL)
+		return NULL;
+
+	const unsigned int width = tex->GetWidth();
+	const unsigned int height = tex->GetHeight();
+	const BYTE *pixels = tex->GetPixels();
+	if(width == 0 || height == 0 || pixels == NULL)
+		return NULL;
+
+	if(column >= width)
+		column %= width;
+	return pixels + column * height;
+}
+
 struct SpriteInfo
 {
 	union
@@ -391,8 +407,9 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 	// Check if we're rendering completely off screen.
 	// Simpler form:
 	// topoffset = ( viewheight/2 - viewshift - (signed(height>>3)*(viewz+(32<<FRACBITS))/(32<<FRACBITS)) )<<3;
+	const fixed actorz = R_InterpolateFixed(actor->oldz, actor->z);
 	const int topoffset = (viewheight<<2) - (viewshift<<3) -
-	                      FixedMul(height, (viewz+(actor->z<<6)+(32<<FRACBITS))>>5);
+	                      FixedMul(height, (viewz+(actorz<<6)+(32<<FRACBITS))>>5);
 	if(-topoffset >= (signed)height)
 		return;
 
@@ -441,7 +458,7 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 	const BYTE *src;
 	byte *destBase = vbuf + actx + startX + ((upperedge>>3) > 0 ? vbufPitch*(upperedge>>3) : 0);
 	byte *dest = destBase;
-#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	OF_WolfGPU_PreloadSource(tex->GetPixels(), tex->GetWidth() * tex->GetHeight());
 #endif
 	unsigned int i;
@@ -451,9 +468,12 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 		if(wallheight[i] > (signed)height)
 			continue;
 
-		src = tex->GetColumn(flip ? texWidth - (x>>FRACBITS) - 1 : (x>>FRACBITS), NULL);
+		src = TextureColumnPixels(tex,
+			flip ? texWidth - (x>>FRACBITS) - 1 : (x>>FRACBITS));
+		if(src == NULL)
+			continue;
 
-#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 		{
 			const fixed yStart = startY*yStep;
 			const int count = yRun > yStart ? int((yRun - yStart + yStep - 1) / yStep) : 0;
@@ -463,7 +483,7 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 				continue;
 			}
 			if(count > 0)
-				OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, vbufPitch);
+				continue;
 		}
 #endif
 
@@ -488,7 +508,8 @@ void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, con
 	unsigned height = height1;
 
 	int scale = height>>3; // Integer part of the height
-	int topoffset = (scale*(viewz+(actor->z<<6)+(32<<FRACBITS))/(32<<FRACBITS));
+	const fixed actorz = R_InterpolateFixed(actor->oldz, actor->z);
+	int topoffset = (scale*(viewz+(actorz<<6)+(32<<FRACBITS))/(32<<FRACBITS));
 
 	if(scale == 0 || -(viewheight/2 - viewshift - topoffset) >= scale)
 		return;
@@ -517,7 +538,7 @@ void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, con
 	byte *dest;
 	int i;
 	unsigned int x;
-#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	OF_WolfGPU_PreloadSource(tex->GetPixels(), tex->GetWidth() * tex->GetHeight());
 #endif
 
@@ -527,7 +548,9 @@ void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, con
 	dxx/=(signed)texWidth,dzz/=(signed)texWidth;
 	dxa+=dxx,dza+=dzz;
 	int nexti = (int)((ny1+(dxa>>8))*::scale/(nx1+(dza>>8))+centerx);
-	src = tex->GetColumn(flip ? texWidth - 1 : 0, NULL);
+	src = TextureColumnPixels(tex, flip ? texWidth - 1 : 0);
+	if(src == NULL)
+		return;
 
 	for(i = x1, x = 0; i < x2; ++i)
 	{
@@ -535,7 +558,9 @@ void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, con
 		{
 			++x;
 			assert(x < texWidth);
-			src = tex->GetColumn(flip ? texWidth - x - 1 : x, NULL);
+			src = TextureColumnPixels(tex, flip ? texWidth - x - 1 : x);
+			if(src == NULL)
+				return;
 
 			dxa += dxx;
 			dza += dzz;
@@ -547,13 +572,13 @@ void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, con
 
 		// recalculation double oh no
 		scale = height>>3;
-		topoffset = (scale*(viewz+(actor->z<<6)+(32<<FRACBITS))/(32<<FRACBITS));
+		topoffset = (scale*(viewz+(actorz<<6)+(32<<FRACBITS))/(32<<FRACBITS));
 
 		if(i < 0 || i >= viewwidth || wallheight[i] > (signed)height || scale == 0 || -(viewheight/2 - viewshift - topoffset) >= scale)
 			continue;
 		
 		dest = vbuf + i + (upperedge > 0 ? vbufPitch*upperedge : 0);
-#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 		{
 			const fixed yStart = startY*yStep;
 			const int count = endY > yStart ? int((endY - yStart + yStep - 1) / yStep) : 0;
@@ -568,7 +593,14 @@ void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, con
 				continue;
 			}
 			if(count > 0)
-				OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, vbufPitch);
+			{
+				dyScale = (height/256.0)*(actor->scaleY/65536.);
+				upperedge = static_cast<int>((viewheight/2 - viewshift - topoffset)+scale - tex->GetScaledTopOffsetDouble()*dyScale);
+				yStep = static_cast<fixed>(tex->yScale/dyScale);
+				startY = -MIN(upperedge, 0);
+				endY = MIN<fixed>(tex->GetHeight()<<FRACBITS, yStep*(viewheight-upperedge));
+				continue;
+			}
 		}
 #endif
 		for(fixed y = startY*yStep;y < endY;y += yStep)
@@ -613,14 +645,18 @@ void Scale3DSprite(AActor *actor, const Frame *frame, unsigned height)
 	fixed playy = viewy;
 
 	fixed gy1,gy2,gx1,gx2,gyt1,gyt2,gxt1,gxt2;
+	const fixed actorx = R_InterpolateFixed(actor->oldx, actor->x);
+	const fixed actory = R_InterpolateFixed(actor->oldy, actor->y);
+	const angle_t actorangle = R_InterpolateAngle(actor->oldangle, actor->angle);
+	const unsigned int actorfineangle = actorangle>>ANGLETOFINESHIFT;
 
 	// translate point to view centered coordinates
 	const fixed scaledOffset = FixedMul(FLOAT2FIXED(tex->GetScaledLeftOffsetDouble()), actor->scaleX);
 	const fixed scaledWidth = FixedMul(FLOAT2FIXED(tex->GetScaledWidthDouble()), actor->scaleX);
-	gy1 = actor->y-playy-(FixedMul(scaledOffset, finecosine[actor->angle>>ANGLETOFINESHIFT])>>6);
-	gy2 = gy1+(FixedMul(scaledWidth, finecosine[actor->angle>>ANGLETOFINESHIFT])>>6);
-	gx1 = actor->x-playx-(FixedMul(scaledOffset, finesine[actor->angle>>ANGLETOFINESHIFT])>>6);
-	gx2 = gx1+(FixedMul(scaledWidth, finesine[actor->angle>>ANGLETOFINESHIFT])>>6);
+	gy1 = actory-playy-(FixedMul(scaledOffset, finecosine[actorfineangle])>>6);
+	gy2 = gy1+(FixedMul(scaledWidth, finecosine[actorfineangle])>>6);
+	gx1 = actorx-playx-(FixedMul(scaledOffset, finesine[actorfineangle])>>6);
+	gx2 = gx1+(FixedMul(scaledWidth, finesine[actorfineangle])>>6);
 	
 	// calculate newx
 	gxt1 = FixedMul(gx1,viewcos);
@@ -725,15 +761,20 @@ void R_DrawPlayerSprite(AActor *actor, const Frame *frame, fixed offsetX, fixed 
 	const BYTE *src;
 	byte *destBase = vbuf+x1+startX + (y1 > 0 ? vbufPitch*y1 : 0);
 	byte *dest = destBase;
-#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	OF_WolfGPU_PreloadSource(tex->GetPixels(), tex->GetWidth() * tex->GetHeight());
 #endif
 	fixed x, y;
 	for(x = startX*xStep;x < xRun;x += xStep)
 	{
-		src = tex->GetColumn(x>>FRACBITS, NULL);
+		src = TextureColumnPixels(tex, x>>FRACBITS);
+		if(src == NULL)
+		{
+			dest = ++destBase;
+			continue;
+		}
 
-#if defined(OF_ECWOLF_GPU_SPRITES) && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 		{
 			const fixed yStart = startY*yStep;
 			const int count = yRun > yStart ? int((yRun - yStart + yStep - 1) / yStep) : 0;
@@ -744,7 +785,10 @@ void R_DrawPlayerSprite(AActor *actor, const Frame *frame, fixed offsetX, fixed 
 				continue;
 			}
 			if(count > 0)
-				OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, vbufPitch);
+			{
+				dest = ++destBase;
+				continue;
+			}
 		}
 #endif
 

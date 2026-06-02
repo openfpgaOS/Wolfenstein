@@ -114,7 +114,9 @@ void ThinkerList::Tick(Priority list)
 		if(!(thinker->ObjectFlags & OF_EuthanizeMe))
 		{
 			thinker->Tick();
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 			GC::CheckGC();
+#endif
 		}
 
 		iter = nextThinker;

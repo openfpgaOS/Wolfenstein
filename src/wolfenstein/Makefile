@@ -43,7 +43,6 @@ OF_ECWOLF_SRC  = of_ecwolf_openfpga.c
 OF_ECWOLF_CD_SRC = of_ecwolf_cd.cpp
 OF_ECWOLF_CXXABI_SRC = of_ecwolf_cxxabi.cpp
 OF_ECWOLF_GPU_SRC = of_ecwolf_gpu.cpp
-OF_ECWOLF_FAST_RENDERER_SRC = of_ecwolf_fast_renderer.cpp
 ECWOLF_MIDI_SRC = $(SDK_DIR)/of_midi.c $(SDK_DIR)/of_smp_bank.c \
 	$(SDK_DIR)/of_smp_voice.c $(SDK_DIR)/of_smp_tables.c
 PC_EXTRA_CFLAGS += $(shell pkg-config --cflags SDL2_mixer 2>/dev/null)
@@ -51,25 +50,28 @@ PC_EXTRA_CFLAGS += $(shell pkg-config --cflags SDL2_net 2>/dev/null)
 PC_EXTRA_LIBS += $(shell pkg-config --libs SDL2_mixer 2>/dev/null || echo -lSDL2_mixer)
 PC_EXTRA_LIBS += $(shell pkg-config --libs SDL2_net 2>/dev/null)
 
-CFLAGS   += -DOF_SDL2_EXTERNAL -DOF_ECWOLF_OPENFPGA -DBZ_NO_STDIO \
+CFLAGS   += -DOF_SDL2_EXTERNAL -DOF_ECWOLF_OPENFPGA \
+	-DOF_ECWOLF_PERF_DISABLED -DBZ_NO_STDIO \
 	$(ECWOLF_INCLUDES) -I$(ZLIB_SRC_DIR) -I$(LZMA_SRC_DIR) -I$(BZIP2_SRC_DIR)
 CFLAGS   += -Wno-old-style-definition -Wno-implicit-fallthrough \
 	-Wno-unused-parameter -Wno-unused-function -Wno-unused-variable \
 	-Wno-unused-but-set-variable
-CXXFLAGS += -DOF_SDL2_EXTERNAL -DOF_ECWOLF_OPENFPGA -DNO_GTK=1
+CXXFLAGS += -DOF_SDL2_EXTERNAL -DOF_ECWOLF_OPENFPGA \
+	-DOF_ECWOLF_PERF_DISABLED -DNO_GTK=1
 CXXFLAGS += -Dstricmp=strcasecmp -Dstrnicmp=strncasecmp
-CXXFLAGS += -DOF_ECWOLF_FAST_RENDERER -DOF_ECWOLF_GPU_WALLS \
-	-DOF_ECWOLF_GPU_SPRITES -DOF_ECWOLF_GPU_PRESENT \
-	-DOF_ECWOLF_GPU_FLOORCEILING -DOF_ECWOLF_GPU_SKY
-# TEMP diagnostic: per-stage frame timings ("Frame profile: ..." every 120 frames).
-# Remove this line once the GPU bottleneck is identified.
-CXXFLAGS += -DOF_ECWOLF_PROFILE_FRAME
 CXXFLAGS += -DBZ_NO_STDIO -Icxx_compat $(ECWOLF_INCLUDES) -I$(ZLIB_SRC_DIR) \
 	-I$(LZMA_SRC_DIR) -I$(BZIP2_SRC_DIR) -std=gnu++11 -fexceptions
 CXXFLAGS += -Wno-implicit-fallthrough -Wno-unused-parameter \
 	-Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable \
 	-Wno-missing-field-initializers -Wno-maybe-uninitialized \
 	-Wno-class-memaccess -Wno-deprecated-copy
+CFLAGS += -MMD -MP
+CXXFLAGS += -MMD -MP
+
+# Match Doom's tighter alignment.  The SDK default 64-byte alignment bloats
+# ECWolf's much larger C++ renderer and wastes hot instruction-cache space.
+CFLAGS += -falign-functions=16 -falign-loops=16
+CXXFLAGS += -falign-functions=16 -falign-loops=16
 
 # Preserve ECWolf's SDL-facing platform layer.  The openfpgaOS-specific
 # implementation lives in the SDK SDL shim, not in the engine sources.
@@ -90,16 +92,18 @@ BZIP2_SRCS = $(addprefix $(BZIP2_SRC_DIR)/, \
 	blocksort.c bzlib.c compress.c crctable.c decompress.c huffman.c randtable.c)
 
 SRCS     = $(ZLIB_SRCS) $(LZMA_SRCS) $(BZIP2_SRCS) $(ECWOLF_C_SRCS) $(OF_ECWOLF_SRC) $(ECWOLF_MIDI_SRC) $(OF_EH_SRC)
-SRCS_CXX = $(ECWOLF_CXX_SRCS) $(OF_ECWOLF_CD_SRC) $(OF_ECWOLF_CXXABI_SRC) $(OF_ECWOLF_GPU_SRC) $(OF_ECWOLF_FAST_RENDERER_SRC) $(OF_CXXABI_SRC)
+SRCS_CXX = $(ECWOLF_CXX_SRCS) $(OF_ECWOLF_CD_SRC) $(OF_ECWOLF_CXXABI_SRC) $(OF_ECWOLF_GPU_SRC) $(OF_CXXABI_SRC)
 PC_SRCS = $(filter-out $(ECWOLF_MIDI_SRC),$(SRCS))
 PC_SRCS_CXX = $(filter-out $(OF_ECWOLF_CD_SRC) $(OF_ECWOLF_CXXABI_SRC) \
-	$(OF_ECWOLF_GPU_SRC) $(OF_ECWOLF_FAST_RENDERER_SRC) $(OF_CXXABI_SRC),$(SRCS_CXX))
+	$(OF_ECWOLF_GPU_SRC) $(OF_CXXABI_SRC),$(SRCS_CXX))
 PC_CXXFLAGS = $(filter-out -Icxx_compat,$(CXXFLAGS))
 
 # Declare default target before sdk.mk's rules
 .DEFAULT_GOAL := all
 
 include $(SDK_DIR)/sdk.mk
+
+-include $(APP_OBJS:.o=.d) $(OF_INIT_OBJ:.o=.d) $(OF_SDL2_OBJ:.o=.d)
 
 STRIP ?= $(CROSS)strip
 

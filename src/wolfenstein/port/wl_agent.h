@@ -128,6 +128,7 @@ extern class player_t
 			fixed		sy;
 		} psprite[NUM_PSPRITES];
 		fixed			bob;
+		fixed			oldbob;
 
 		// Attackheld is similar to buttonheld[bt_attack] only it only gets set
 		// to true when an attack is registered. If the button is released and

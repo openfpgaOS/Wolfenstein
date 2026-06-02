@@ -9,6 +9,7 @@
 #include "actor.h"
 #include "thingdef/thingdef.h"
 #include "wl_agent.h"
+#include "wl_draw.h"
 #include "wl_game.h"
 #include "wl_net.h"
 #include "wl_play.h"
@@ -671,12 +672,12 @@ bool MoveObj (AActor *ob, int32_t move)
 	//
 	for(unsigned int i = 0;i < Net::InitVars.numPlayers;++i)
 	{
+		fixed r = ob->radius + players[i].mo->radius;
+		if (abs(ob->x - players[i].mo->x) > r || abs(ob->y - players[i].mo->y) > r)
+			continue;
+
 		if (map->CheckLink(ob->GetZone(), players[i].mo->GetZone(), true))
 		{
-			fixed r = ob->radius + players[i].mo->radius;
-			if (abs(ob->x - players[i].mo->x) > r || abs(ob->y - players[i].mo->y) > r)
-				continue;
-
 			if ((players[i].mo->flags & FL_SHOOTABLE) && ob->GetClass()->Meta.GetMetaInt(AMETA_Damage) >= 0)
 				DamageActor (players[i].mo, ob, ob->GetDamage());
 
@@ -1067,6 +1068,19 @@ static bool CheckSightTo (AActor *ob, AActor *target, double minseedist, double 
 
 	if(fov < 359.75)
 	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		if(fov > 179.5 && fov < 180.5)
+		{
+			const unsigned int fineangle = ob->angle >> ANGLETOFINESHIFT;
+			const int64_t dot =
+				(int64_t)deltax * finecosine[fineangle] -
+				(int64_t)deltay * finesine[fineangle];
+			if(dot <= 0)
+				return false;
+		}
+		else
+#endif
+		{
 		//
 		// see if they are looking in the right direction
 		//
@@ -1079,6 +1093,7 @@ static bool CheckSightTo (AActor *ob, AActor *target, double minseedist, double 
 		angle_t upperAngle = MAX(iangle, ob->angle);
 		if(MIN(upperAngle - lowerAngle, lowerAngle - upperAngle) > angle_t(fov*ANGLE_1))
 			return false;
+		}
 	}
 
 	//
