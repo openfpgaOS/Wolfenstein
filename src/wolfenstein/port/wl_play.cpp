@@ -615,12 +615,16 @@ void PollJoystickMove (void)
 			// Match the digital controls: a fully deflected stick at the
 			// default sensitivity (10) contributes exactly BASEMOVE/BASETURN
 			// per tic, doubled by the run shift below -- the same rates as a
-			// held key or d-pad.  The old scale topped out at 5*sensitivity
-			// (= 50 at default), making analog sticks ~43% faster than
-			// digital input.
+			// held key or d-pad.  (The old scale topped out at 5*sensitivity
+			// = 50 at default, making analog sticks ~43% faster than digital
+			// input.)  The response is quadratic: full deflection keeps the
+			// digital speed, but small and mid deflections are softened for
+			// finer aiming -- a linear stick felt touchy around the center.
 			const int rawaxis = clamp(IN_GetJoyAxis(axisnum), -0x7FFF, 0x7FFF);
 			const int dzfactor = clamp(JoySensitivity[axisnum].deadzone*0x8000/20, 0, 0x7FFF);
-			int axis = clamp(abs(rawaxis)+1-dzfactor, 0, 0x8000)*BASEMOVE*JoySensitivity[axisnum].sensitivity/(10*(0x8000-dzfactor));
+			const int range = 0x8000 - dzfactor;
+			const int norm = clamp(abs(rawaxis)+1-dzfactor, 0, 0x8000)*256/range; // 0..256
+			int axis = norm*norm*BASEMOVE*JoySensitivity[axisnum].sensitivity/(10*256*256);
 			if(useam)
 				axis >>= 2;
 			else if(control[ConsolePlayer].buttonstate[bt_run])
