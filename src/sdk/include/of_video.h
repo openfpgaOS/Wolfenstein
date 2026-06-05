@@ -1,3 +1,9 @@
+//------------------------------------------------------------------------------
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileType: SOURCE
+// SPDX-FileCopyrightText: (c) 2026, ThinkElastic <Think@Elastic.com>
+//------------------------------------------------------------------------------
+
 /*
  * of_video.h -- Video subsystem API for openfpgaOS
  *
@@ -397,6 +403,16 @@ uint32_t of_video_vblank_count(void);
 static inline void of_video_set_refresh_vtotal(uint32_t v_total) {
     (void)v_total;
 }
+
+/* Get surface as 16-bit for direct color modes (mirrors the HW inline). */
+static inline uint16_t *of_video_surface16(void) {
+    return (uint16_t *)of_video_surface();
+}
+
+/* Triple-buffer indexing — PC stubs live in of_sdl2.c (no GPU-triggered
+ * flip path on desktop, so acquire_next just hands back the draw surface). */
+int      of_video_acquire_next(int just_flipped_idx, uint32_t fence_token);
+uint8_t *of_video_buffer_addr(int idx);
 
 /* Convert and set a VGA 6-bit palette (768 bytes: R,G,B triplets, 0-63 range).
  * Converts to 8-bit 0x00RRGGBB and sets all 256 entries at once. */

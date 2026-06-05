@@ -1,0 +1,107 @@
+{
+    "instance": {
+        "magic": "APF_VER_1",
+        "variant_select": {
+            "id": 666,
+            "select": false
+        },
+        "data_slots": [
+            {
+                "id": 1,
+                "filename": "os.bin"
+            },
+            {
+                "id": 2,
+                "filename": "wolf3d.ini"
+            },
+            {
+                "id": 3,
+                "filename": "wolfenstein.elf"
+            },
+            {
+                "id": 4,
+                "filename": "wolfmidi.zip"
+            },
+            {
+                "id": 5,
+                "filename": "AUDIOHED.WL6"
+            },
+            {
+                "id": 6,
+                "filename": "AUDIOT.WL6"
+            },
+            {
+                "id": 7,
+                "filename": "bank.ofsf"
+            },
+            {
+                "id": 8,
+                "filename": "ecwolf.cfg"
+            },
+            {
+                "id": 10,
+                "filename": "Wolfenstein3D_0.sav"
+            },
+            {
+                "id": 11,
+                "filename": "Wolfenstein3D_1.sav"
+            },
+            {
+                "id": 12,
+                "filename": "Wolfenstein3D_2.sav"
+            },
+            {
+                "id": 13,
+                "filename": "Wolfenstein3D_3.sav"
+            },
+            {
+                "id": 14,
+                "filename": "Wolfenstein3D_4.sav"
+            },
+            {
+                "id": 15,
+                "filename": "Wolfenstein3D_5.sav"
+            },
+            {
+                "id": 16,
+                "filename": "Wolfenstein3D_6.sav"
+            },
+            {
+                "id": 17,
+                "filename": "Wolfenstein3D_7.sav"
+            },
+            {
+                "id": 18,
+                "filename": "Wolfenstein3D_8.sav"
+            },
+            {
+                "id": 19,
+                "filename": "Wolfenstein3D_9.sav"
+            },
+            {
+                "id": 20,
+                "filename": "MAPHEAD.WL6"
+            },
+            {
+                "id": 21,
+                "filename": "VGADICT.WL6"
+            },
+            {
+                "id": 22,
+                "filename": "VGAGRAPH.WL6"
+            },
+            {
+                "id": 23,
+                "filename": "VGAHEAD.WL6"
+            },
+            {
+                "id": 24,
+                "filename": "VSWAP.WL6"
+            },
+            {
+                "id": 25,
+                "filename": "GAMEMAPS.WL6"
+            }
+        ]
+    }
+}

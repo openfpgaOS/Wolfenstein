@@ -42,8 +42,11 @@ static void DrawParallaxPlaneLoop(byte *vbuf, unsigned vbufPitch,
 		{
 			return;
 		}
+		// GPU rejected the column (non-power-of-two sky height, ...): sync
+		// the destination cache lines and draw it on the CPU below so
+		// nothing is silently dropped.
 		if(count > 0)
-			return;
+			OF_WolfGPU_PrepareForCPUAccessColumn(vbuf, count, (int)vbufPitch);
 	}
 #endif
 

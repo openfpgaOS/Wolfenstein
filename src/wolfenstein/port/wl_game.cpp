@@ -33,6 +33,7 @@
 #include "colormatcher.h"
 #include "thingdef/thingdef.h"
 #include "doomerrors.h"
+#include "of_ecwolf_gpu.h"
 
 #ifdef MYPROFILE
 #include <TIME.H>
@@ -717,6 +718,9 @@ bool GameLoop (void)
 	bool dointermission;
 
 restartgame:
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_WolfGPU_SetNextVideoFramePreserve(false);
+#endif
 	VW_FadeOut();
 	DrawPlayScreen ();
 	died = false;

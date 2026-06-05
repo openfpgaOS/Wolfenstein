@@ -231,6 +231,17 @@ void SoundInformation::QueueDigitalLoad(const SoundIndex &index)
 #endif
 }
 
+/* Queue every digitized sound that is not loaded yet.  Drained behind the
+ * level-load screen so SD_PrepareSound/Mix_LoadWAV never run inside the
+ * frame loop (a first-play lazy load cost several ms and dropped a frame). */
+void SoundInformation::QueueAllDigitalLoads()
+{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	for(unsigned int i = 1;i < sounds.Size();++i)
+		QueueDigitalLoad(SoundIndex((int)i));
+#endif
+}
+
 SoundIndex SoundInformation::PumpDigitalLoads(int maxLoads)
 {
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)

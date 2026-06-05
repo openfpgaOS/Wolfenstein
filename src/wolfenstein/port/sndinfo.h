@@ -107,6 +107,7 @@ class SoundInformation
 		void			Init();
 		SoundIndex		PumpDigitalLoads(int maxLoads=1);
 		void			QueueDigitalLoad(const SoundIndex &index);
+		void			QueueAllDigitalLoads();
 		const SoundData	&operator[] (const char* logical) const { return operator[](FindSound(logical)); }
 		const SoundData	&operator[] (const SoundIndex &index) const;
 		uint32_t		GetLastPlayTick(const SoundData &sound) const { return lastPlayTicks[sound.index]; }

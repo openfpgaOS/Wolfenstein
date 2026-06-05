@@ -800,14 +800,27 @@ void PreloadGraphics (bool showPsych)
 
 	TexMan.PrecacheLevel();
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// Decode every digitized sound now, behind the load screen.  They used
+	// to load lazily on first play, which ran SD_PrepareSound/Mix_LoadWAV
+	// inside the frame loop and dropped a frame -- a visible hitch the
+	// first time each sound played.
+	SoundInfo.QueueAllDigitalLoads();
+	SoundInfo.PumpDigitalLoads(0x7FFFFFFF);
+#endif
+
 	if(showPsych)
 	{
 		PreloadUpdate (10, 10);
 		IN_UserInput (70, ACK_Any);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		DrawPlayScreen ();
+#else
 		VW_FadeOut ();
 
 		DrawPlayScreen ();
 		VW_UpdateScreen ();
+#endif
 	}
 }
 

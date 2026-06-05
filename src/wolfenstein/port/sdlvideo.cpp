@@ -413,7 +413,7 @@ CUSTOM_CVAR (Float, bgamma, 1.f, CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
 static MiniModeInfo WinModes[] =
 {
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	{ 320, 240 },
+	{ 320, 200 },
 #else
 	{ 320, 200 },
 	{ 320, 240 },

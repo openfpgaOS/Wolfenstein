@@ -51,6 +51,7 @@ namespace GameSave
 	MenuItem	*GetSaveMenuItem();
 	void		InitMenus();
 	void		QuickLoadOrSave(bool load);
+	void		SetOpenFPGASavePrefix(const char *prefix);
 
 	bool		Load(const FString &filename);
 	bool		Save(const FString &filename, const FString &title);

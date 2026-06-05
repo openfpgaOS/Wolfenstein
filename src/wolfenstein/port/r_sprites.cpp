@@ -482,8 +482,10 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 			{
 				continue;
 			}
+			// GPU rejected the column: sync the destination cache lines and
+			// draw it on the CPU below so nothing is silently dropped.
 			if(count > 0)
-				continue;
+				OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, (int)vbufPitch);
 		}
 #endif
 
@@ -592,15 +594,10 @@ void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, con
 				endY = MIN<fixed>(tex->GetHeight()<<FRACBITS, yStep*(viewheight-upperedge));
 				continue;
 			}
+			// GPU rejected the column: sync the destination cache lines and
+			// draw it on the CPU below so nothing is silently dropped.
 			if(count > 0)
-			{
-				dyScale = (height/256.0)*(actor->scaleY/65536.);
-				upperedge = static_cast<int>((viewheight/2 - viewshift - topoffset)+scale - tex->GetScaledTopOffsetDouble()*dyScale);
-				yStep = static_cast<fixed>(tex->yScale/dyScale);
-				startY = -MIN(upperedge, 0);
-				endY = MIN<fixed>(tex->GetHeight()<<FRACBITS, yStep*(viewheight-upperedge));
-				continue;
-			}
+				OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, (int)vbufPitch);
 		}
 #endif
 		for(fixed y = startY*yStep;y < endY;y += yStep)
@@ -784,11 +781,10 @@ void R_DrawPlayerSprite(AActor *actor, const Frame *frame, fixed offsetX, fixed 
 				dest = ++destBase;
 				continue;
 			}
+			// GPU rejected the column: sync the destination cache lines and
+			// draw it on the CPU below so nothing is silently dropped.
 			if(count > 0)
-			{
-				dest = ++destBase;
-				continue;
-			}
+				OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, (int)vbufPitch);
 		}
 #endif
 
@@ -878,6 +874,9 @@ void R_DrawZoomer(FTextureID texID)
 			break;
 
 		ThreeDRefresh();
+		// The zoomer draws with the CPU into the live frame; close the GPU
+		// frame first so the writes are coherently published at present.
+		OF_WolfGPU_FallbackToCPU();
 		zoomer->Draw();
 		VH_UpdateScreen();
 		CalcTics();

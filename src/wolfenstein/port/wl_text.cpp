@@ -674,6 +674,7 @@ static void ShowBriefing(FString str)
 
 	DrawMultiLineText(str, font, textcolor, alignment, anchor);
 
+	VW_UpdateScreen();
 	VL_FadeIn(0,255,10);
 	IN_Ack(ACK_Any);
 }

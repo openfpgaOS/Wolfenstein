@@ -34,6 +34,10 @@
 
 #include <cstdlib>
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+extern void OF_EarlyStartupScreen(int progress);
+#endif
+
 #ifndef NO_GTK
 #include <gtk/gtk.h>
 bool GtkAvailable;
@@ -41,6 +45,10 @@ bool GtkAvailable;
 
 int main(int argc, char *argv[])
 {
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_EarlyStartupScreen(1);
+#endif
+
 	// Set LC_NUMERIC environment variable in case some library decides to
 	// clear the setlocale call at least this will be correct.
 	// Note that the LANG environment variable is overridden by LC_*

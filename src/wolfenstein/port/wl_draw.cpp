@@ -24,6 +24,7 @@
 #include "wl_agent.h"
 #include "wl_draw.h"
 #include "wl_game.h"
+#include "wl_main.h"
 #include "wl_net.h"
 #include "wl_play.h"
 #include "wl_state.h"
@@ -31,7 +32,6 @@
 #include "thingdef/thingdef.h"
 #include "of_ecwolf_gpu.h"
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-#include "of_video.h"
 #define OF_ECWOLF_WALL_GPU_ENABLED 1
 #define OF_ECWOLF_SPRITE_GPU_ENABLED 1
 #define OF_ECWOLF_FLOOR_GPU_ENABLED 1
@@ -328,15 +328,21 @@ void ScalePost()
 		yw=(texyscale>>2)-1;
 	}
 
-	while(yendoffs >= viewheight)
+	if(yendoffs >= viewheight)
 	{
-		ywcount -= texyscale;
-		while(ywcount <= 0)
+		// Closed form of the old per-row clip loop: each clipped row removed
+		// one texyscale from ywcount, topping it back into (0, yd] with one
+		// texel step per yd added.  With the death camera at floor level the
+		// loop ran thousands of iterations per column.
+		const int excess = yendoffs - (viewheight - 1);
+		ywcount -= excess * texyscale;
+		if(ywcount <= 0)
 		{
-			ywcount += yd;
-			yw--;
+			const int steps = (-ywcount) / yd + 1;
+			ywcount += steps * yd;
+			yw -= steps;
 		}
-		yendoffs--;
+		yendoffs = viewheight - 1;
 	}
 	if(yw < 0)
 		yw = (texyscale>>2) - ((-yw) % (texyscale>>2));
@@ -347,22 +353,31 @@ void ScalePost()
 		const int topRow = (yoffs - postx) / (int)vbufPitch;
 		const int bottomRow = yendoffs;
 		const int count = bottomRow - topRow + 1;
-		if(count > 0 && yd > 0 && sourceLen > 0)
+		if(count > 0)
 		{
-			const int texstep = int(((int64_t)texyscale << FRACBITS) / yd);
-			const int texfracBottom = ((yw + 1) << FRACBITS) - 1;
-			const int texfrac = texfracBottom - texstep * (count - 1);
 			byte *dest = vbuf + topRow * (int)vbufPitch + postx;
-			if(OF_WolfGPU_DrawColumn(dest, count, postsource, sourceLen,
-				texfrac, texstep, shadeIndex))
+			if(yd > 0 && sourceLen > 0)
 			{
-				return;
+				// texyscale <= 4*256 whenever the GPU accepts the column
+				// (DrawColumn rejects sourceLen > 256), so the shifted
+				// dividend fits 32 bits; avoids a soft 64-bit division per
+				// column.
+				const int texstep =
+					(int)(((uint32_t)texyscale << FRACBITS) / (uint32_t)yd);
+				const int texfracBottom = ((yw + 1) << FRACBITS) - 1;
+				const int texfrac = texfracBottom - texstep * (count - 1);
+				if(OF_WolfGPU_DrawColumn(dest, count, postsource, sourceLen,
+					texfrac, texstep, shadeIndex))
+				{
+					return;
+				}
 			}
+			// GPU rejected the column (odd texture scale, off-frame dest,
+			// ...): sync the destination cache lines and draw it on the CPU
+			// below so nothing is silently dropped.
+			OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, (int)vbufPitch);
 		}
 	}
-#endif
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	return;
 #endif
 
 	col = curshades[postsource[yw]];
@@ -1398,45 +1413,6 @@ void R_RenderView()
 ========================
 */
 
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-static bool OF_WolfClearFrameSpan(byte *frameBase, byte *dest, unsigned count,
-	byte color, unsigned pitch, unsigned height)
-{
-	if(count == 0)
-		return true;
-	if(frameBase == NULL || dest == NULL || pitch == 0 || height == 0)
-		return false;
-	if(pitch > OF_VIDEO_MAX_STRIDE || height > OF_VIDEO_MAX_HEIGHT)
-		return false;
-
-	const uintptr_t base = (uintptr_t)frameBase;
-	const uintptr_t target = (uintptr_t)dest;
-	const uint32_t frameBytes = pitch * height;
-	if(frameBytes == 0 || frameBytes > OF_VIDEO_MAX_FRAME_BYTES ||
-		target < base || target - base > frameBytes ||
-		count > frameBytes - (uint32_t)(target - base))
-	{
-		return false;
-	}
-
-	if(count % pitch == 0)
-	{
-		const unsigned rows = count / pitch;
-		if(OF_WolfGPU_ClearRect(dest, (int)pitch, (int)rows, color))
-			return true;
-		for(unsigned row = 0; row < rows; ++row)
-		{
-			if(!OF_WolfGPU_ClearSpan(dest + row * pitch, (int)pitch, color))
-				return false;
-		}
-		return true;
-	}
-	if(count <= pitch && OF_WolfGPU_ClearSpan(dest, (int)count, color))
-		return true;
-	return false;
-}
-#endif
-
 
 void    ThreeDRefresh (void)
 {
@@ -1455,13 +1431,19 @@ void    ThreeDRefresh (void)
 	const unsigned screenWidth = (unsigned)SCREENWIDTH;
 	const unsigned screenHeight = (unsigned)SCREENHEIGHT;
 	const bool openfpgaFullRedraw =
-		(screenofs == 0 && (unsigned)viewwidth == screenWidth &&
-			(unsigned)viewheight == screenHeight) ||
-		(viewscreenx == 0 && (unsigned)viewwidth == screenWidth &&
-			(unsigned)viewheight == 200 && screenHeight >= 240);
+		screenofs == 0 && (unsigned)viewwidth == screenWidth &&
+		(unsigned)viewheight == screenHeight;
 	if(openfpgaFullRedraw)
 	{
 		OF_WolfGPU_SetNextVideoFramePreserve(false);
+	}
+	else if((unsigned)viewwidth == screenWidth && viewheight > 0)
+	{
+		// Full-width view with a status bar / letterbox: the GPU fully
+		// redraws the view rows, so the acquire-time preserve copy only
+		// needs the bar/border rows above and below them.
+		OF_WolfGPU_SetNextVideoFramePreserveExcludeRows(viewscreeny,
+			viewscreeny + viewheight);
 	}
 #endif
 	perfStart = OF_WolfPerf_NowUS();
@@ -1485,47 +1467,6 @@ void    ThreeDRefresh (void)
 #endif
 	OF_WolfPerf_Add(OF_WOLF_PERF_RENDER_BEGIN, perfStart);
 #endif
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	perfStart = OF_WolfPerf_NowUS();
-	if(openfpgaFullRedraw && screenofs != 0 && viewscreenx == 0)
-	{
-		const byte black = GPalette.BlackIndex;
-		const unsigned topRows = (unsigned)viewscreeny;
-		const unsigned bottomStart = (unsigned)(viewscreeny + viewheight);
-		const uint32_t frameBytes =
-			(vbufPitch <= OF_VIDEO_MAX_STRIDE && screenHeight <= OF_VIDEO_MAX_HEIGHT) ?
-			vbufPitch * screenHeight : 0;
-		if(vbufPitch == 0 || vbufPitch > OF_VIDEO_MAX_STRIDE ||
-			screenHeight == 0 || screenHeight > OF_VIDEO_MAX_HEIGHT ||
-			frameBytes == 0 || frameBytes > OF_VIDEO_MAX_FRAME_BYTES)
-		{
-			printf("OpenFPGA GPU: skipped unsafe border clear pitch=%u height=%u.\n",
-				vbufPitch, screenHeight);
-		}
-		else
-		{
-			if(topRows != 0 &&
-				!OF_WolfClearFrameSpan(openfpgaFrameBase, openfpgaFrameBase,
-					topRows * vbufPitch, black, vbufPitch, screenHeight))
-			{
-				printf("OpenFPGA GPU: skipped unsafe top clear pitch=%u rows=%u height=%u.\n",
-					vbufPitch, topRows, screenHeight);
-			}
-			if(bottomStart < screenHeight)
-			{
-				byte *bottom = openfpgaFrameBase + bottomStart * vbufPitch;
-				const unsigned bottomRows = screenHeight - bottomStart;
-				if(!OF_WolfClearFrameSpan(openfpgaFrameBase, bottom,
-					bottomRows * vbufPitch, black, vbufPitch, screenHeight))
-				{
-					printf("OpenFPGA GPU: skipped unsafe bottom clear pitch=%u start=%u rows=%u height=%u.\n",
-						vbufPitch, bottomStart, bottomRows, screenHeight);
-				}
-			}
-		}
-	}
-	OF_WolfPerf_Add(OF_WOLF_PERF_RENDER_CLEAR, perfStart);
-#endif
 	R_RenderView();
 
 	perfStart = OF_WolfPerf_NowUS();
@@ -1537,7 +1478,15 @@ void    ThreeDRefresh (void)
 	if(player_t *player = players[ConsolePlayer].camera->player)
 	{
 		if(player->ScreenFader)
+		{
+			// The death fizzle writes the framebuffer directly on the CPU.
+			// Close the GPU frame first so the GPU is drained and the fader's
+			// writes are coherently published by the (now full-buffer) flush
+			// at present; otherwise they linger as dirty cache lines that
+			// evict over later GPU frames as flashing line artifacts.
+			OF_WolfGPU_FallbackToCPU();
 			player->ScreenFader->Update();
+		}
 	}
 
 //

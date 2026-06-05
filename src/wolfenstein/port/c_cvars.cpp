@@ -361,11 +361,11 @@ void ReadConfig(void)
 	}
 
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	// Keep the renderer on the native openfpgaOS 8-bit framebuffer. Larger
-	// saved desktop modes force the SDL shim into a slow software scaling path.
+	// Keep the renderer on Doom's native openfpgaOS 320x200 8-bit path.
+	// Larger saved desktop modes force the SDL shim into a slow software path.
 	vid_fullscreen = false;
 	fullScreenWidth = windowedScreenWidth = screenWidth = 320;
-	fullScreenHeight = windowedScreenHeight = screenHeight = 240;
+	fullScreenHeight = windowedScreenHeight = screenHeight = 200;
 #endif
 
 	// Propogate localDesiredFOV to players

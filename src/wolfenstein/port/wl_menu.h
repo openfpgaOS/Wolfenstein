@@ -46,6 +46,7 @@ void MenuFadeIn();
 #define NM_Y    100
 #define NM_W    225
 #define NM_H    13*4+15
+#define SKILL_X ((320 - NM_W) / 2 + 8)
 
 #define NE_X    10
 #define NE_Y    23

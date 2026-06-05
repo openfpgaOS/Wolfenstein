@@ -21,6 +21,34 @@ static int of_ecwolf_slot_matches(uint32_t expected_slot, const char *filename)
     return of_file_slot_find(filename, &slot) == 0 && slot == expected_slot;
 }
 
+static void of_ecwolf_register_base_file_aliases(const char *extension)
+{
+    static const char *const names[] = {
+        "AUDIOHED", "AUDIOT", "GAMEMAPS", "MAPHEAD",
+        "VGADICT", "VGAGRAPH", "VGAHEAD", "VSWAP"
+    };
+    static const uint32_t slots[] = {
+        /* GAMEMAPS moved from slot 9 to 25: a data.json slot between the
+         * Shared Config (8) and the saves (10-19) shifts the APF datatable
+         * entry positions that the kernel map and the RTL SAVE_DT size
+         * commit assume, which silently corrupted save-file sizes. */
+        5, 6, 25, 20, 21, 22, 23, 24
+    };
+
+    char filename[24];
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+    {
+        snprintf(filename, sizeof(filename), "%s.%s", names[i], extension);
+        of_file_slot_register(slots[i], filename);
+    }
+}
+
+static void of_ecwolf_set_data_extension(const char *extension)
+{
+    setenv("ECWOLF_DATA_EXT", extension, 1);
+    printf("OpenFPGA: selecting ECWolf data extension .%s.\n", extension);
+}
+
 static void of_ecwolf_select_data_extension(void)
 {
     const char *current = getenv("ECWOLF_DATA_EXT");
@@ -31,15 +59,45 @@ static void of_ecwolf_select_data_extension(void)
      * CUE/BIN), so pick the ECWolf data extension from whichever VSWAP variant
      * the instance bound. */
     uint32_t slot = 0;
-    if (of_file_slot_find("VSWAP.WL6", &slot) == 0)
+    if (of_ecwolf_slot_matches(2, "spear-m2.ini"))
     {
-        setenv("ECWOLF_DATA_EXT", "wl6", 1);
-        printf("OpenFPGA: selecting ECWolf data extension .wl6.\n");
+        of_ecwolf_register_base_file_aliases("SD2");
+        of_ecwolf_set_data_extension("sd2");
+    }
+    else if (of_ecwolf_slot_matches(2, "spear-m3.ini"))
+    {
+        of_ecwolf_register_base_file_aliases("SD3");
+        of_ecwolf_set_data_extension("sd3");
+    }
+    else if (of_file_slot_find("VSWAP.WL6", &slot) == 0)
+    {
+        of_ecwolf_register_base_file_aliases("WL6");
+        of_ecwolf_set_data_extension("wl6");
     }
     else if (of_file_slot_find("VSWAP.SOD", &slot) == 0)
     {
-        setenv("ECWOLF_DATA_EXT", "sod", 1);
-        printf("OpenFPGA: selecting ECWolf data extension .sod.\n");
+        of_ecwolf_register_base_file_aliases("SOD");
+        of_ecwolf_set_data_extension("sod");
+    }
+    else if (of_file_slot_find("VSWAP.SDM", &slot) == 0)
+    {
+        of_ecwolf_register_base_file_aliases("SDM");
+        of_ecwolf_set_data_extension("sdm");
+    }
+    else if (of_file_slot_find("VSWAP.SD2", &slot) == 0)
+    {
+        of_ecwolf_register_base_file_aliases("SD2");
+        of_ecwolf_set_data_extension("sd2");
+    }
+    else if (of_file_slot_find("VSWAP.SD3", &slot) == 0)
+    {
+        of_ecwolf_register_base_file_aliases("SD3");
+        of_ecwolf_set_data_extension("sd3");
+    }
+    else if (of_file_slot_find("VSWAP.N3D", &slot) == 0)
+    {
+        of_ecwolf_register_base_file_aliases("N3D");
+        of_ecwolf_set_data_extension("n3d");
     }
 }
 
@@ -94,7 +152,7 @@ static void of_ecwolf_openfpga_init(void)
 
     for (int i = 0; i < 10; i++)
     {
-        snprintf(name, sizeof(name), "savegam%d.ecs", i);
+        snprintf(name, sizeof(name), "savegam%d.sav", i);
         of_file_slot_register((uint32_t)(10 + i), name);
     }
 }

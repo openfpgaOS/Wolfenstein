@@ -192,15 +192,17 @@ static bool R_TextureFirstColor(FTexture *texture, byte &color)
 	return true;
 }
 
-static byte R_ShadeSolidPlaneRow(fixed planeheight, int rowDistance,
+/* planeVis is FixedDiv(r_depthvisibility, abs(planeheight)) hoisted by the
+ * caller -- FixedDiv is a soft 64-bit division on this target and the old
+ * per-row form burned hundreds of them per frame. */
+static byte R_ShadeSolidPlaneRow(fixed planeVis, int rowDistance,
 	byte baseColor)
 {
 	if(rowDistance <= 0)
 		rowDistance = 1;
 
 	const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
-	const int tz = FixedMul(FixedDiv(r_depthvisibility, abs(planeheight)),
-		rowDistance << FRACBITS);
+	const int tz = FixedMul(planeVis, rowDistance << FRACBITS);
 	const int shadeIndex = GETPALOOKUP(tz, shade);
 	return NormalLight.Maps[(shadeIndex << 8) + baseColor];
 }
@@ -211,18 +213,19 @@ static bool R_ClearSolidBackdropHalfGPU(byte *vbuf, unsigned vbufPitch,
 	if(planeheight == 0 || yStart >= yEnd)
 		return true;
 
+	const fixed planeVis = FixedDiv(r_depthvisibility, abs(planeheight));
 	for(int y = yStart; y < yEnd;)
 	{
 		const int rowDistance = y < horizon ? horizon - y : y - horizon + 1;
 		const byte rowColor =
-			R_ShadeSolidPlaneRow(planeheight, rowDistance, baseColor);
+			R_ShadeSolidPlaneRow(planeVis, rowDistance, baseColor);
 
 		int runEnd = y + 1;
 		while(runEnd < yEnd)
 		{
 			const int nextDistance =
 				runEnd < horizon ? horizon - runEnd : runEnd - horizon + 1;
-			if(R_ShadeSolidPlaneRow(planeheight, nextDistance, baseColor) !=
+			if(R_ShadeSolidPlaneRow(planeVis, nextDistance, baseColor) !=
 				rowColor)
 			{
 				break;
@@ -264,6 +267,7 @@ static bool R_DrawTexturedBackdropHalfGPU(byte *vbuf, unsigned vbufPitch,
 	const int viewyFrac = (viewy & (FRACUNIT - 1)) << 8;
 	const fixed planenumerator = abs(FixedMul(heightnumerator, planeheight));
 	const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
+	const fixed planeVis = FixedDiv(r_depthvisibility, abs(planeheight));
 
 	for(int y = yStart; y < yEnd; ++y)
 	{
@@ -280,8 +284,7 @@ static bool R_DrawTexturedBackdropHalfGPU(byte *vbuf, unsigned vbufPitch,
 		gu -= (viewwidth >> 1) * du;
 		gv -= (viewwidth >> 1) * dv;
 
-		const int tz = FixedMul(FixedDiv(r_depthvisibility,
-			abs(planeheight)), rowDistance << FRACBITS);
+		const int tz = FixedMul(planeVis, rowDistance << FRACBITS);
 		const int shadeIndex = GETPALOOKUP(tz, shade);
 		if(!OF_WolfGPU_DrawSpan(vbuf + y * (int)vbufPitch, viewwidth,
 			tex, 64, 64, -gv >> 2, gu >> 2, -dv >> 2, du >> 2,
@@ -384,6 +387,8 @@ static void R_DrawSolidPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight,
 		tex_offsetPitch = -vbufPitch;
 	}
 
+	const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
+	const fixed planeVis = FixedDiv(r_depthvisibility, abs(planeheight));
 	for(int y = y0;floor ? y+halfheight < viewheight : y < halfheight; ++y, tex_offset += tex_offsetPitch)
 	{
 		if(floor ? (y+halfheight < 0) : (y < halfheight - viewheight))
@@ -391,8 +396,7 @@ static void R_DrawSolidPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight,
 			continue;
 		}
 
-		const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
-		const int tz = FixedMul(FixedDiv(r_depthvisibility, abs(planeheight)), abs(((halfheight)<<16) - ((halfheight-y)<<16)));
+		const int tz = FixedMul(planeVis, abs(((halfheight)<<16) - ((halfheight-y)<<16)));
 		const int shadeIndex = GETPALOOKUP(tz, shade);
 		const byte rowColor = NormalLight.Maps[(shadeIndex<<8) + baseColor];
 
@@ -478,6 +482,8 @@ static void R_DrawPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight, int 
 
 	unsigned int oldmapx = INT_MAX, oldmapy = INT_MAX;
 	const byte* curshades = NormalLight.Maps;
+	const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
+	const fixed planeVis = FixedDiv(r_depthvisibility, abs(planeheight));
 	// draw horizontal lines
 	for(int y = y0;floor ? y+halfheight < viewheight : y < halfheight; ++y, tex_offset += tex_offsetPitch)
 	{
@@ -498,8 +504,7 @@ static void R_DrawPlane(byte *vbuf, unsigned vbufPitch, int min_wallheight, int 
 		gv -= (viewwidth >> 1) * dv; // starting point (leftmost)
 
 		// Depth fog
-		const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
-		const int tz = FixedMul(FixedDiv(r_depthvisibility, abs(planeheight)), abs(((halfheight)<<16) - ((halfheight-y)<<16)));
+		const int tz = FixedMul(planeVis, abs(((halfheight)<<16) - ((halfheight-y)<<16)));
 		const int shadeIndex = GETPALOOKUP(tz, shade);
 		curshades = &NormalLight.Maps[shadeIndex<<8];
 

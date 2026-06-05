@@ -16,7 +16,7 @@ provided instances reference the game's data files **directly** as APF data
 slots — there is no CUE/BIN disc image and no `/cd` ISO bridge. The eight ECWolf
 data files are extracted from the original media and dropped into `common/`:
 
-- `Wolf3D.json`: `AUDIOHED.WL6` `AUDIOT.WL6` `GAMEMAPS.WL6` `MAPHEAD.WL6`
+- `Wolfenstein 3D.json`: `AUDIOHED.WL6` `AUDIOT.WL6` `GAMEMAPS.WL6` `MAPHEAD.WL6`
   `VGADICT.WL6` `VGAGRAPH.WL6` `VGAHEAD.WL6` `VSWAP.WL6`
 - `Spear.json`: the same eight files with the `.SOD` extension
 
@@ -39,7 +39,7 @@ Config, so the eight data files take 5, 6, 9 and 20-24):
 | 7 | `bank.ofsf` (MIDI SoundFont, preloaded by the SDK MIDI path) |
 | 8 | `ecwolf.cfg` (shared config, nonvolatile) |
 | 9 | `GAMEMAPS` |
-| 10-19 | `savegam0.ecs` … `savegam9.ecs` (nonvolatile saves) |
+| 10-19 | per-instance `.ecs` saves, selected by `-saveprefix` |
 | 20-24 | `MAPHEAD`, `VGADICT`, `VGAGRAPH`, `VGAHEAD`, `VSWAP` |
 
 Wolfenstein 3-D and Spear of Destiny use IMF/AdLib music in the original media,
@@ -113,17 +113,18 @@ This path is compile-verified but has not yet been validated on hardware.
 
 ## Saves
 
-ECWolf uses `ecwolf.cfg` for settings and `savegamN.ecs` for saves. The core
-maps these into nonvolatile APF slots:
+ECWolf uses `ecwolf.cfg` for settings and `.ecs` save files. The core maps
+these into nonvolatile APF slots:
 
 - slot 8: `ecwolf.cfg`
-- slots 10-19: `savegam0.ecs` through `savegam9.ecs`
+- slots 10-19: ten per-instance saves selected by `-saveprefix`, for example
+  `Wolfenstein3D_0.ecs` through `Wolfenstein3D_9.ecs`
 
-`of_ecwolf_openfpga.c` registers those basenames with the openFPGA file service
-before `main()` and mounts the selected CUE/BIN disc image at
-`/cd`. Target builds also define `OF_ECWOLF_OPENFPGA`; the guarded path in
-`port/filesys.cpp` makes ECWolf enumerate config and saves from the virtual root
-where APF files are visible.
+`of_ecwolf_openfpga.c` registers the config slot before `main()`, and
+`GameSave::SetOpenFPGASavePrefix` registers the instance save basenames from the
+launcher INI. Target builds also define `OF_ECWOLF_OPENFPGA`; the guarded path
+in `port/filesys.cpp` makes ECWolf enumerate config and saves from the virtual
+root where APF files are visible.
 
 ## Controls
 

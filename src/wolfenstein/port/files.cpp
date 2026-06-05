@@ -43,7 +43,9 @@
 #include "templates.h"
 #include "zdoomsupport.h"
 #if defined(OF_ECWOLF_OPENFPGA)
+#include <ctype.h>
 #include <stdint.h>
+#include <string.h>
 #endif
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 #include "of_file.h"
@@ -58,6 +60,95 @@ static const long OF_ECWOLF_SLURP_CHUNK = 32 * 1024;
 static volatile int OFSlurpReadDone;
 static volatile int OFSlurpReadResult;
 
+static const char *OFSlotBasename(const char *filename)
+{
+	if (filename == NULL)
+		return NULL;
+
+	const char *base = filename;
+	for (const char *p = filename; *p != 0; ++p)
+	{
+		if (*p == '/' || *p == '\\' || *p == ':')
+			base = p + 1;
+	}
+	return base;
+}
+
+static void OFUpperCopy(char *dest, size_t destSize, const char *src)
+{
+	if (destSize == 0)
+		return;
+
+	size_t i = 0;
+	while (i + 1 < destSize && src != NULL && src[i] != 0)
+	{
+		dest[i] = (char)toupper((unsigned char)src[i]);
+		++i;
+	}
+	dest[i] = 0;
+}
+
+static long OFTryFileSizeName(const char *filename)
+{
+	if (filename == NULL || filename[0] == 0 ||
+		OF_SVC->count <= OF_FILE_SVC_INDEX(file_size) ||
+		OF_SVC->file_size == NULL)
+		return -1;
+	return OF_SVC->file_size(filename);
+}
+
+static int OFTrySlotFind(const char *filename, uint32_t *slot)
+{
+	if (filename == NULL || filename[0] == 0)
+		return -1;
+	return of_file_slot_find(filename, slot);
+}
+
+static int OFResolveSlotName(const char *filename, uint32_t *slot)
+{
+	if (OFTrySlotFind(filename, slot) == 0)
+		return 0;
+
+	const char *base = OFSlotBasename(filename);
+	if (base != filename && OFTrySlotFind(base, slot) == 0)
+		return 0;
+
+	char upper[128];
+	OFUpperCopy(upper, sizeof(upper), base);
+	if (upper[0] != 0 && OFTrySlotFind(upper, slot) == 0)
+		return 0;
+
+	return -1;
+}
+
+static bool OFHasPrefixNoCase(const char *text, const char *prefix)
+{
+	if (text == NULL || prefix == NULL)
+		return false;
+
+	while (*prefix != 0)
+	{
+		if (*text == 0 ||
+			toupper((unsigned char)*text) != toupper((unsigned char)*prefix))
+		{
+			return false;
+		}
+		++text;
+		++prefix;
+	}
+	return true;
+}
+
+static bool OFPreferStreamSlurp(const char *filename)
+{
+	const char *base = OFSlotBasename(filename);
+	if (base == NULL)
+		return false;
+
+	return OFHasPrefixNoCase(base, "gamemaps.") ||
+		OFHasPrefixNoCase(base, "maptemp.");
+}
+
 static void OFSlurpReadCallback(int, int result)
 {
 	OFSlurpReadResult = result;
@@ -70,28 +161,54 @@ static long OFFileSizeService(const char *filename, FILE *file)
 		return -1;
 
 	long zeroLength = -1;
+	long bestLength = -1;
+	const char *base = OFSlotBasename(filename);
+	char upper[128];
+	OFUpperCopy(upper, sizeof(upper), base);
+
+	long len = OFTryFileSizeName(upper);
+	if (len > 0)
+		bestLength = len;
+	if (len == 0)
+		zeroLength = 0;
+
+	if (base != filename)
+	{
+		len = OFTryFileSizeName(base);
+		if (len > 0)
+		{
+			if (len > bestLength)
+				bestLength = len;
+		}
+		if (len == 0)
+			zeroLength = 0;
+	}
+
+	len = OFTryFileSizeName(filename);
+	if (len > 0)
+	{
+		if (len > bestLength)
+			bestLength = len;
+	}
+	if (len == 0)
+		zeroLength = 0;
+
 	if (file != NULL &&
 		OF_SVC->count > OF_FILE_SVC_INDEX(file_size_fd) &&
 		OF_SVC->file_size_fd != NULL)
 	{
-		long len = OF_SVC->file_size_fd(fileno(file));
+		len = OF_SVC->file_size_fd(fileno(file));
 		if (len > 0)
-			return len;
+		{
+			if (len > bestLength)
+				bestLength = len;
+		}
 		if (len == 0)
 			zeroLength = 0;
 	}
 
-	if (filename != NULL &&
-		OF_SVC->count > OF_FILE_SVC_INDEX(file_size) &&
-		OF_SVC->file_size != NULL)
-	{
-		long len = OF_SVC->file_size(filename);
-		if (len > 0)
-			return len;
-		if (len == 0)
-			zeroLength = 0;
-	}
-
+	if (bestLength > 0)
+		return bestLength;
 	return zeroLength;
 }
 
@@ -135,7 +252,7 @@ static bool OFSlurpSlot(const char *filename, long knownLength, char **buffer, l
 		return false;
 
 	uint32_t slot = 0;
-	if (of_file_slot_find(filename, &slot) < 0)
+	if (OFResolveSlotName(filename, &slot) < 0)
 		return false;
 
 	char *buf = (char *)malloc((size_t)knownLength);
@@ -235,6 +352,8 @@ bool FileReader::Open (const char *filename)
 	long knownLength = -1;
 #if !defined(OF_PC)
 	knownLength = OFFileSizeService(filename, File);
+	if (OFPreferStreamSlurp(filename))
+		knownLength = -1;
 #endif
 	if (SlurpStream(filename, knownLength))
 	{
@@ -267,7 +386,8 @@ bool FileReader::SlurpStream (const char *filename, long knownLength)
 #if !defined(OF_PC)
 	char *slotBuffer = NULL;
 	long slotLength = 0;
-	if (OFSlurpSlot(filename, knownLength, &slotBuffer, &slotLength))
+	if (!OFPreferStreamSlurp(filename) &&
+		OFSlurpSlot(filename, knownLength, &slotBuffer, &slotLength))
 	{
 		Buffer = slotBuffer;
 		BufferLen = slotLength;

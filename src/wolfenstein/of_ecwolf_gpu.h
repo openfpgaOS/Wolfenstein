@@ -58,10 +58,14 @@ static inline void OF_WolfPerf_FrameEnd(void) {}
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 void OF_WolfGPU_Init(void);
 void OF_WolfGPU_Shutdown(void);
+void OF_WolfGPU_ApplyRefreshPolicy(void);
 bool OF_WolfGPU_CanUseVideoFrames(int width, int height);
 bool OF_WolfGPU_AcquireVideoFrame(uint8_t **framebuffer, int *pitch,
 	int width, int height);
 void OF_WolfGPU_SetNextVideoFramePreserve(bool preserve);
+void OF_WolfGPU_SetNextVideoFramePreserveExcludeRows(int y0, int y1);
+bool OF_WolfGPU_USSinceDisplaySync(uint32_t *us_out);
+bool OF_WolfGPU_FlipVideoBuffer(int idx, uint32_t *token);
 bool OF_WolfGPU_PresentVideoFrame(void);
 void OF_WolfGPU_ResetVideoFrames(void);
 void OF_WolfGPU_BeginFrame(uint8_t *framebuffer, int pitch, int height);
@@ -79,6 +83,7 @@ bool OF_WolfGPU_DrawMaskedColumn(uint8_t *dest, int count,
 bool OF_WolfGPU_DrawRawColumn(uint8_t *dest, int count,
 	const uint8_t *source, int source_len, int texfrac, int texstep);
 void OF_WolfGPU_PreloadSource(const uint8_t *source, uint32_t bytes);
+void OF_WolfGPU_SourceBuffersChanged(void);
 bool OF_WolfGPU_DrawSpan(uint8_t *dest, int count, const uint8_t *source,
 	int tex_width, int tex_height, int sfrac, int tfrac,
 	int sstep, int tstep, int light);
@@ -87,10 +92,14 @@ bool OF_WolfGPU_ClearRect(uint8_t *dest, int width, int height, uint8_t color);
 #else
 static inline void OF_WolfGPU_Init(void) {}
 static inline void OF_WolfGPU_Shutdown(void) {}
+static inline void OF_WolfGPU_ApplyRefreshPolicy(void) {}
 static inline bool OF_WolfGPU_CanUseVideoFrames(int, int) { return false; }
 static inline bool OF_WolfGPU_AcquireVideoFrame(uint8_t **, int *,
 	int, int) { return false; }
 static inline void OF_WolfGPU_SetNextVideoFramePreserve(bool) {}
+static inline void OF_WolfGPU_SetNextVideoFramePreserveExcludeRows(int, int) {}
+static inline bool OF_WolfGPU_USSinceDisplaySync(uint32_t *) { return false; }
+static inline bool OF_WolfGPU_FlipVideoBuffer(int, uint32_t *) { return false; }
 static inline bool OF_WolfGPU_PresentVideoFrame(void) { return false; }
 static inline void OF_WolfGPU_ResetVideoFrames(void) {}
 static inline void OF_WolfGPU_BeginFrame(uint8_t *, int, int) {}
@@ -106,6 +115,7 @@ static inline bool OF_WolfGPU_DrawMaskedColumn(uint8_t *, int,
 static inline bool OF_WolfGPU_DrawRawColumn(uint8_t *, int,
 	const uint8_t *, int, int, int) { return false; }
 static inline void OF_WolfGPU_PreloadSource(const uint8_t *, uint32_t) {}
+static inline void OF_WolfGPU_SourceBuffersChanged(void) {}
 static inline bool OF_WolfGPU_DrawSpan(uint8_t *, int, const uint8_t *,
 	int, int, int, int, int, int, int) { return false; }
 static inline bool OF_WolfGPU_ClearSpan(uint8_t *, int, uint8_t) { return false; }

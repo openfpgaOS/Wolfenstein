@@ -187,9 +187,26 @@ void PlayLoop (void);
 
 static int32_t lasttimecount;
 
+static uint64_t GetTimeUS()
+{
+	const uint64_t counter = SDL_GetPerformanceCounter();
+	const uint64_t frequency = SDL_GetPerformanceFrequency();
+	if(frequency == 0)
+		return (uint64_t)SDL_GetTicks() * 1000ull;
+	if(frequency == 1000000ull)
+		return counter;
+	return (counter / frequency) * 1000000ull +
+		(counter % frequency) * 1000000ull / frequency;
+}
+
+static uint64_t TicsToUS(uint32_t timecount)
+{
+	return (uint64_t)timecount * 1000000ull / TICRATE;
+}
+
 int32_t GetTimeCount()
 {
-	return MS2TICS(SDL_GetTicks());
+	return (int32_t)(GetTimeUS() * TICRATE / 1000000ull);
 }
 
 static void UseCurrentRenderTime()
@@ -206,13 +223,43 @@ static void UpdateRenderInterpolation()
 		return;
 	}
 
-	const uint32_t curtime = SDL_GetTicks();
-	const uint32_t ticstart = TICS2MS((uint32_t)lasttimecount);
-	const uint32_t into = curtime > ticstart ? curtime - ticstart : 0;
-	uint64_t frac = (uint64_t)into * TICRATE * FRACUNIT / 1000;
-	if(frac > FRACUNIT)
-		frac = FRACUNIT;
+	/* lasttimecount is the absolute wall-clock tic index of the newest
+	 * simulated tic (CalcTics keeps it synced to GetTimeCount()), so the
+	 * newest state becomes fully current exactly one tic period after
+	 * TicsToUS(lasttimecount).  Anchoring on that exact boundary -- rather
+	 * than re-deriving it from the phase of "now" -- keeps the time mapping
+	 * consistent when the present path blocks on the display and the render
+	 * slides past a period boundary. */
+	uint64_t curtime = GetTimeUS();
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	/* When the loop is display-locked (the last buffer acquire blocked until
+	 * the previous swap was consumed at vsync), re-anchor the time sample on
+	 * that vsync instead of "now".  The wall-clock distance from vsync to
+	 * this call varies with maintenance/sim load every frame, and with a
+	 * fixed display cadence that variance otherwise shows up directly as
+	 * motion jitter.  Sampling vsync+4ms makes the rendered timeline a pure
+	 * function of the display clock; the 4 ms skew keeps the fraction inside
+	 * the interpolation window for any tic phase. */
+	uint32_t sinceSync;
+	if(OF_WolfGPU_USSinceDisplaySync(&sinceSync) && sinceSync < 20000u)
+		curtime = curtime - sinceSync + 4000u;
+#endif
+
+	const uint64_t anchor = TicsToUS((uint32_t)lasttimecount);
+	uint64_t frac = 0;
+	if(curtime > anchor)
+		frac = (curtime - anchor) * TICRATE * FRACUNIT / 1000000ull;
+	/* Allow bounded extrapolation past the newest tic instead of clamping:
+	 * the sample point can legitimately sit a few ms beyond the newest
+	 * snapshot (a tic boundary crossed between CalcTics and here).  Clamping
+	 * held the previous state for a frame -- a visible stutter while turning
+	 * at a constant rate; extrapolating the last tic's delta renders
+	 * constant-rate motion exactly and costs at most a third of a tic of
+	 * overshoot for one frame when motion stops. */
+	const uint64_t fracmax = FRACUNIT + FRACUNIT / 3;
+	if(frac > fracmax)
+		frac = fracmax;
 	renderfraction = (fixed)frac;
 	renderbasetimecount = gamestate.TimeCount - 1;
 }
@@ -251,24 +298,40 @@ static bool AnyPlayerNeedsSpawn()
 
 void CalcTics()
 {
+	int32_t curtimecount = GetTimeCount();
+
 //
 // calculate tics since last refresh for adaptive timing
 //
 
 	// Have we arrived too soon?
-	while(lasttimecount == GetTimeCount()+1)
+	while(lasttimecount == curtimecount + 1)
+	{
 		SDL_Delay(1);
+		curtimecount = GetTimeCount();
+	}
 
 	// Detect rollover, particularly if the game were paused for a LONG time
-	if(lasttimecount > GetTimeCount())
+	if(lasttimecount > curtimecount)
+	{
 		ResetTimeCount();
+		curtimecount = lasttimecount;
+	}
 
-	uint32_t curtime = SDL_GetTicks();
-	tics = MS2TICS(curtime) - lasttimecount;
+	uint64_t curtimeus = GetTimeUS();
+	curtimecount = (int32_t)(curtimeus * TICRATE / 1000000ull);
+	tics = curtimecount - lasttimecount;
 	if(!tics)
 	{
 		// wait until end of current tic
-		SDL_Delay(TICS2MS(lasttimecount + 1) - curtime);
+		const uint64_t targetus = TicsToUS((uint32_t)(lasttimecount + 1));
+		while(targetus > curtimeus)
+		{
+			const uint64_t waitus = targetus - curtimeus;
+			if(waitus > 1500ull)
+				SDL_Delay((Uint32)((waitus - 500ull) / 1000ull));
+			curtimeus = GetTimeUS();
+		}
 		tics = 1;
 	}
 	else if(Net::IsBlocked())
@@ -346,6 +409,18 @@ void PollKeyboardButtons (void)
 				control[ConsolePlayer].buttonstate[controlScheme[i].button] = true;
 		}
 	}
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// The OpenFPGA SDL shim delivers the L2/R2 triggers as PageDown/PageUp
+	// key state (they have no SDL controller-button equivalent), so bind
+	// them here instead of taking over the scheme table's single keyboard
+	// slot per action: L2 opens doors, R2 fires.  The face buttons keep
+	// their regular bindings.
+	if(Keyboard[sc_PgDn])
+		control[ConsolePlayer].buttonstate[bt_use] = true;
+	if(Keyboard[sc_PgUp])
+		control[ConsolePlayer].buttonstate[bt_attack] = true;
+#endif
 }
 
 
@@ -537,10 +612,15 @@ void PollJoystickMove (void)
 		{
 			int axisnum = (scheme->joystick-32)>>1;
 			bool positive = (scheme->joystick&1) != 0;
-			// Scale to -100 - 100
+			// Match the digital controls: a fully deflected stick at the
+			// default sensitivity (10) contributes exactly BASEMOVE/BASETURN
+			// per tic, doubled by the run shift below -- the same rates as a
+			// held key or d-pad.  The old scale topped out at 5*sensitivity
+			// (= 50 at default), making analog sticks ~43% faster than
+			// digital input.
 			const int rawaxis = clamp(IN_GetJoyAxis(axisnum), -0x7FFF, 0x7FFF);
 			const int dzfactor = clamp(JoySensitivity[axisnum].deadzone*0x8000/20, 0, 0x7FFF);
-			int axis = clamp(abs(rawaxis)+1-dzfactor, 0, 0x8000)*5*JoySensitivity[axisnum].sensitivity/(0x8000-dzfactor);
+			int axis = clamp(abs(rawaxis)+1-dzfactor, 0, 0x8000)*BASEMOVE*JoySensitivity[axisnum].sensitivity/(10*(0x8000-dzfactor));
 			if(useam)
 				axis >>= 2;
 			else if(control[ConsolePlayer].buttonstate[bt_run])
@@ -715,7 +795,7 @@ void ProcessEvents()
 			SDL_Delay(timediff);
 
 		if(timediff < -2 * DEMOTICS)       // more than 2-times DEMOTICS behind?
-			lasttimecount = MS2TICS(curtime);    // yes, set to current timecount
+			lasttimecount = GetTimeCount();      // yes, set to current timecount
 
 		tics = DEMOTICS;
 	}
@@ -739,6 +819,24 @@ void BumpGamma()
 	VW_UpdateScreen();
 	IN_Ack(ACK_Block);
 }
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+static void OF_WolfReturnToGameFrame()
+{
+	if(startgame || loadedgame)
+		return;
+
+	if(viewsize != 21)
+	{
+		VH_AcquireDeferredScreenLock();
+		DrawPlayScreen();
+	}
+	else
+		OF_WolfGPU_SetNextVideoFramePreserve(false);
+
+	PlayFrame();
+}
+#endif
 
 /*
 =====================
@@ -786,8 +884,7 @@ void CheckKeys (void)
 //
 // F1-F7/ESC to enter control panel
 //
-	if (scan == sc_F10 ||
-		scan == sc_F9 || scan == sc_F7 || scan == sc_F8)     // pop up quit dialog
+	if (scan == sc_F9 || scan == sc_F7 || scan == sc_F8)
 	{
 		ClearSplitVWB ();
 		US_ControlPanel (scan);
@@ -796,12 +893,24 @@ void CheckKeys (void)
 
 		IN_ClearKeysDown ();
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		if(!startgame && !loadedgame)
+			OF_WolfReturnToGameFrame();
+		else
+#endif
 		if(screenfaded && Net::IsBlocked())
 			PlayFrame();
 		return;
 	}
 
-	if ((scan >= sc_F1 && scan <= sc_F9) || scan == sc_Escape || control[ConsolePlayer].buttonstate[bt_esc])
+	// bt_esc (the Start button) is reported as a LEVEL while held, so require
+	// a fresh press: without the held check, pressing Start inside the menu
+	// closed it (via the synthesized Escape key edge) and the still-held
+	// button instantly reopened it -- seen as the menu "flashing".  With it,
+	// Start cleanly toggles the menu open and closed.
+	if ((scan >= sc_F1 && scan <= sc_F9) || scan == sc_Escape ||
+		(control[ConsolePlayer].buttonstate[bt_esc] &&
+		 !control[ConsolePlayer].buttonheld[bt_esc]))
 	{
 		int lastoffs = StopMusic ();
 		SD_StopDigitized();
@@ -809,6 +918,10 @@ void CheckKeys (void)
 		US_ControlPanel (control[ConsolePlayer].buttonstate[bt_esc] ? sc_Escape : scan);
 
 		IN_ClearKeysDown ();
+		// The menu may have just been closed with Start; mark bt_esc as still
+		// pressed so the next control poll records it as held and a held
+		// button cannot re-trigger the menu until it is released.
+		control[ConsolePlayer].buttonstate[bt_esc] = true;
 
 		if(screenfaded)
 		{
@@ -826,12 +939,21 @@ void CheckKeys (void)
 
 			// If another player is blocking the play sim we may need to refresh
 			// the frame now before we wait for input.
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+			if(!startgame && !loadedgame)
+				OF_WolfReturnToGameFrame();
+			else
+#endif
 			if (Net::IsBlocked())
 				PlayFrame();
 		}
 		else
 		{
 			ContinueMusic (lastoffs);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+			if(!startgame && !loadedgame)
+				OF_WolfReturnToGameFrame();
+#endif
 		}
 		return;
 	}
@@ -1096,7 +1218,13 @@ void PlayFrame()
 	}
 	OF_WolfPerf_Add(OF_WOLF_PERF_OVERLAY, perfStart);
 
-	VH_UpdateScreen(playstate != ex_stillplaying || screenfaded);
+	/* Reacquire immediately: with the display's one-swap-per-refresh FIFO
+	 * flip semantics the buffer acquire is where the loop blocks until the
+	 * previous swap is consumed.  Blocking here, at the end of the frame,
+	 * means the next frame's input poll, simulation and interpolation
+	 * timestamps are all taken on a fresh post-vsync time base instead of
+	 * being skewed by a mid-frame stall inside the renderer. */
+	VH_UpdateScreen(true);
 }
 
 /*

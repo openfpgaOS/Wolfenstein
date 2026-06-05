@@ -172,6 +172,9 @@ void VH_UpdateScreen(bool reacquire)
 #endif
 	perfStart = OF_WolfPerf_NowUS();
 	screen->Lock(false);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	deferredScreenAcquire = false;
+#endif
 	OF_WolfPerf_Add(OF_WOLF_PERF_ACQUIRE, perfStart);
 }
 

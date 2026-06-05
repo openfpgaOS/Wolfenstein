@@ -1,0 +1,107 @@
+{
+    "instance": {
+        "magic": "APF_VER_1",
+        "variant_select": {
+            "id": 666,
+            "select": false
+        },
+        "data_slots": [
+            {
+                "id": 1,
+                "filename": "os.bin"
+            },
+            {
+                "id": 2,
+                "filename": "spear-m2.ini"
+            },
+            {
+                "id": 3,
+                "filename": "wolfenstein.elf"
+            },
+            {
+                "id": 4,
+                "filename": "wolfmidi.zip"
+            },
+            {
+                "id": 5,
+                "filename": "SOD-M2/AUDIOHED.SOD"
+            },
+            {
+                "id": 6,
+                "filename": "SOD-M2/AUDIOT.SOD"
+            },
+            {
+                "id": 7,
+                "filename": "bank.ofsf"
+            },
+            {
+                "id": 8,
+                "filename": "ecwolf.cfg"
+            },
+            {
+                "id": 10,
+                "filename": "SpearM2_0.sav"
+            },
+            {
+                "id": 11,
+                "filename": "SpearM2_1.sav"
+            },
+            {
+                "id": 12,
+                "filename": "SpearM2_2.sav"
+            },
+            {
+                "id": 13,
+                "filename": "SpearM2_3.sav"
+            },
+            {
+                "id": 14,
+                "filename": "SpearM2_4.sav"
+            },
+            {
+                "id": 15,
+                "filename": "SpearM2_5.sav"
+            },
+            {
+                "id": 16,
+                "filename": "SpearM2_6.sav"
+            },
+            {
+                "id": 17,
+                "filename": "SpearM2_7.sav"
+            },
+            {
+                "id": 18,
+                "filename": "SpearM2_8.sav"
+            },
+            {
+                "id": 19,
+                "filename": "SpearM2_9.sav"
+            },
+            {
+                "id": 20,
+                "filename": "SOD-M2/MAPHEAD.SOD"
+            },
+            {
+                "id": 21,
+                "filename": "SOD-M2/VGADICT.SOD"
+            },
+            {
+                "id": 22,
+                "filename": "SOD-M2/VGAGRAPH.SOD"
+            },
+            {
+                "id": 23,
+                "filename": "SOD-M2/VGAHEAD.SOD"
+            },
+            {
+                "id": 24,
+                "filename": "SOD-M2/VSWAP.SOD"
+            },
+            {
+                "id": 25,
+                "filename": "SOD-M2/GAMEMAPS.SOD"
+            }
+        ]
+    }
+}

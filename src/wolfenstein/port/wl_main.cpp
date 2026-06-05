@@ -47,6 +47,13 @@
 #include "g_conversation.h"
 #include "g_intermission.h"
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#include "of_ecwolf_gpu.h"
+#include "of_ecwolf_boot_logo.h"
+#include "of_cache.h"
+#include "of_video.h"
+#endif
+
 #include <clocale>
 #include <cstdlib>
 
@@ -76,10 +83,271 @@
 #define VIEWWIDTH       256                     // size of view window
 #define VIEWHEIGHT      144
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+struct OFEarlyStartupState
+{
+	bool videoReady;
+	bool displayReady;
+	bool modeReady;
+	bool paletteReady;
+	bool gpuReady;
+	bool buffersPrimed;
+	bool haveFlip;
+	int lastFlipIdx;
+	int lastProgress;
+	uint32_t lastFlipToken;
+};
+
+static OFEarlyStartupState ofEarlyStartup = {
+	false, false, false, false, false, false, false, -1, -1, 0
+};
+
+static void OFEarlyFillRect(byte *fb, int pitch, int width, int height,
+	int x, int y, int w, int h, byte color)
+{
+	if(fb == NULL || pitch <= 0 || width <= 0 || height <= 0 || w <= 0 || h <= 0)
+		return;
+	if(x < 0) { w += x; x = 0; }
+	if(y < 0) { h += y; y = 0; }
+	if(x + w > width) w = width - x;
+	if(y + h > height) h = height - y;
+	if(w <= 0 || h <= 0)
+		return;
+
+	for(int row = 0;row < h;++row)
+		memset(fb + (y + row) * pitch + x, color, w);
+}
+
+static void OFEarlyDrawLogo(byte *fb, int pitch, int width, int height)
+{
+	if(fb == NULL || pitch <= 0 || width <= 0 || height <= 0)
+		return;
+
+	const int x0 = (width - OF_BOOT_LOGO_WIDTH) / 2;
+	const int y0 = (height - (OF_BOOT_LOGO_HEIGHT + 18 + 8)) / 2;
+	for(int y = 0;y < OF_BOOT_LOGO_HEIGHT;++y)
+	{
+		const int dstY = y0 + y;
+		if(dstY < 0 || dstY >= height)
+			continue;
+		for(int x = 0;x < OF_BOOT_LOGO_WIDTH;++x)
+		{
+			const int dstX = x0 + x;
+			if(dstX < 0 || dstX >= width)
+				continue;
+			const byte color = OFBootLogoPixels[y * OF_BOOT_LOGO_WIDTH + x];
+			if(color != 0)
+				fb[dstY * pitch + dstX] = color;
+		}
+	}
+}
+
+static void OFEarlyDrawStartupFrame(byte *fb, int pitch, int width, int height,
+	int progress)
+{
+	OFEarlyFillRect(fb, pitch, width, height, 0, 0, width, height, 0);
+	OFEarlyDrawLogo(fb, pitch, width, height);
+
+	const int barW = width * 8 / 15;
+	const int barH = 8;
+	const int barX = (width - barW) / 2;
+	const int barY = (height - (OF_BOOT_LOGO_HEIGHT + 18 + barH)) / 2 +
+		OF_BOOT_LOGO_HEIGHT + 18;
+	const int fillW = barW * progress / 100;
+	OFEarlyFillRect(fb, pitch, width, height, barX - 2, barY - 2, barW + 4, barH + 4, 2);
+	OFEarlyFillRect(fb, pitch, width, height, barX - 1, barY - 1, barW + 2, barH + 2, 1);
+	OFEarlyFillRect(fb, pitch, width, height, barX, barY, barW, barH, 0);
+	OFEarlyFillRect(fb, pitch, width, height, barX, barY, fillW, barH, 4);
+	if(fillW > 0)
+		OFEarlyFillRect(fb, pitch, width, height, barX, barY, fillW, 2, 5);
+}
+
+static bool OFEarlyDrawStartupIndex(int drawIdx, int pitch, int width,
+	int height, int progress, uint32_t frameBytes)
+{
+	byte *fb = of_video_buffer_addr(drawIdx);
+	if(fb == NULL)
+		return false;
+
+	OFEarlyDrawStartupFrame(fb, pitch, width, height, progress);
+	if(frameBytes != 0)
+		of_cache_flush_range(fb, frameBytes);
+	else
+		of_video_flush();
+	return true;
+}
+
+static bool OFEarlyDrawSolidIndex(int drawIdx, int pitch, int width,
+	int height, byte color, uint32_t frameBytes)
+{
+	byte *fb = of_video_buffer_addr(drawIdx);
+	if(fb == NULL)
+		return false;
+
+	OFEarlyFillRect(fb, pitch, width, height, 0, 0, width, height, color);
+	if(frameBytes != 0)
+		of_cache_flush_range(fb, frameBytes);
+	else
+		of_video_flush();
+	return true;
+}
+
+void OF_EarlyStartupScreen(int progress)
+{
+	if(progress < 0)
+		progress = 0;
+	else if(progress > 100)
+		progress = 100;
+
+	if(!ofEarlyStartup.videoReady)
+	{
+		of_video_init();
+		ofEarlyStartup.videoReady = true;
+	}
+	if(!ofEarlyStartup.displayReady)
+	{
+		of_video_set_display_mode(OF_DISPLAY_FRAMEBUFFER);
+		ofEarlyStartup.displayReady = true;
+	}
+	if(!ofEarlyStartup.gpuReady)
+	{
+		OF_WolfGPU_Init();
+		OF_WolfGPU_ApplyRefreshPolicy();
+		ofEarlyStartup.gpuReady = true;
+	}
+
+	of_video_mode_t mode;
+	of_video_get_mode(&mode);
+	if(!ofEarlyStartup.modeReady || mode.width != 320 || mode.height != 200 ||
+		mode.color_mode != OF_VIDEO_MODE_8BIT)
+	{
+		of_video_mode_t want;
+		memset(&want, 0, sizeof(want));
+		want.width = 320;
+		want.height = 200;
+		want.color_mode = OF_VIDEO_MODE_8BIT;
+		of_video_set_mode(&want);
+		OF_WolfGPU_ApplyRefreshPolicy();
+
+		of_video_get_mode(&mode);
+		ofEarlyStartup.modeReady = mode.width == 320 && mode.height == 200 &&
+			mode.color_mode == OF_VIDEO_MODE_8BIT;
+		ofEarlyStartup.paletteReady = false;
+		ofEarlyStartup.buffersPrimed = false;
+		ofEarlyStartup.haveFlip = false;
+		ofEarlyStartup.lastFlipIdx = -1;
+		ofEarlyStartup.lastProgress = -1;
+		ofEarlyStartup.lastFlipToken = 0;
+	}
+
+	if(mode.color_mode != OF_VIDEO_MODE_8BIT || mode.width == 0 || mode.height == 0)
+		return;
+
+	const int width = mode.width;
+	const int height = mode.height;
+	const int pitch = mode.stride ? mode.stride : mode.width;
+
+	if(!ofEarlyStartup.paletteReady)
+	{
+		uint32_t palette[256];
+		memset(palette, 0, sizeof(palette));
+		palette[0] = 0x000000;
+		palette[1] = 0x151515;
+		palette[2] = 0xa0a0a0;
+		palette[3] = 0x5c0000;
+		palette[4] = 0xc00000;
+		palette[5] = 0xff4040;
+		for(int i = 0;i < OF_BOOT_LOGO_PALETTE_COUNT;++i)
+			palette[OF_BOOT_LOGO_PALETTE_BASE + i] = OFBootLogoPalette[i];
+		of_video_palette_bulk(palette, 256);
+		ofEarlyStartup.paletteReady = true;
+	}
+
+	uint32_t frameBytes = 0;
+	if(pitch > 0 && pitch <= OF_VIDEO_MAX_STRIDE &&
+		height > 0 && height <= OF_VIDEO_MAX_HEIGHT)
+	{
+		frameBytes = (uint32_t)pitch * (uint32_t)height;
+	}
+
+	if(ofEarlyStartup.buffersPrimed && progress == ofEarlyStartup.lastProgress)
+		return;
+
+	const int framesToPresent = ofEarlyStartup.buffersPrimed ? 1 : 3;
+	for(int i = 0;i < framesToPresent;++i)
+	{
+		const int acquireIdx = ofEarlyStartup.haveFlip ? ofEarlyStartup.lastFlipIdx : -1;
+		const uint32_t acquireToken = ofEarlyStartup.haveFlip ? ofEarlyStartup.lastFlipToken : 0;
+		const int drawIdx = of_video_acquire_next(acquireIdx, acquireToken);
+		if(drawIdx < 0)
+			return;
+		if(!OFEarlyDrawStartupIndex(drawIdx, pitch, width, height,
+			progress, frameBytes))
+		{
+			return;
+		}
+
+		uint32_t flipToken = 0;
+		if(!OF_WolfGPU_FlipVideoBuffer(drawIdx, &flipToken))
+			return;
+		ofEarlyStartup.lastFlipToken = flipToken;
+		of_video_wait_flip();
+		ofEarlyStartup.lastFlipIdx = drawIdx;
+		ofEarlyStartup.haveFlip = true;
+	}
+
+	ofEarlyStartup.buffersPrimed = true;
+	ofEarlyStartup.lastProgress = progress;
+}
+
+static void OF_EarlyStartupBlackout()
+{
+	if(!ofEarlyStartup.videoReady || !ofEarlyStartup.gpuReady)
+		return;
+
+	of_video_mode_t mode;
+	of_video_get_mode(&mode);
+	if(mode.color_mode != OF_VIDEO_MODE_8BIT || mode.width == 0 || mode.height == 0)
+		return;
+
+	const int width = mode.width;
+	const int height = mode.height;
+	const int pitch = mode.stride ? mode.stride : mode.width;
+	uint32_t frameBytes = 0;
+	if(pitch > 0 && pitch <= OF_VIDEO_MAX_STRIDE &&
+		height > 0 && height <= OF_VIDEO_MAX_HEIGHT)
+	{
+		frameBytes = (uint32_t)pitch * (uint32_t)height;
+	}
+
+	for(int i = 0;i < 3;++i)
+	{
+		const int acquireIdx = ofEarlyStartup.haveFlip ? ofEarlyStartup.lastFlipIdx : -1;
+		const uint32_t acquireToken = ofEarlyStartup.haveFlip ? ofEarlyStartup.lastFlipToken : 0;
+		const int drawIdx = of_video_acquire_next(acquireIdx, acquireToken);
+		if(drawIdx < 0)
+			return;
+		if(!OFEarlyDrawSolidIndex(drawIdx, pitch, width, height, 0, frameBytes))
+			return;
+
+		uint32_t flipToken = 0;
+		if(!OF_WolfGPU_FlipVideoBuffer(drawIdx, &flipToken))
+			return;
+		ofEarlyStartup.lastFlipToken = flipToken;
+		of_video_wait_flip();
+		ofEarlyStartup.lastFlipIdx = drawIdx;
+		ofEarlyStartup.haveFlip = true;
+	}
+
+	ofEarlyStartup.buffersPrimed = true;
+	ofEarlyStartup.lastProgress = -1;
+}
+#endif
+
 /*
 =============================================================================
 
-							GLOBAL VARIABLES
+						 GLOBAL VARIABLES
 
 =============================================================================
 */
@@ -420,7 +688,7 @@ static void InitGame()
 		printf("SDL_Init: Using SDL %d.%d.%d\n", ver.major, ver.minor, ver.patch);
 		}
 
-#ifdef OF_ECWOLF_OPENFPGA
+#if defined(OF_ECWOLF_OPENFPGA) && defined(OF_ECWOLF_STARTUP_PROFILE)
 	uint32_t startupStart = SDL_GetTicks();
 	uint32_t stepStart = startupStart;
 #endif
@@ -433,7 +701,7 @@ static void InitGame()
 		{
 			I_FatalError("Unable to init SDL: %s", SDL_GetError());
 		}
-#ifdef OF_ECWOLF_OPENFPGA
+#if defined(OF_ECWOLF_OPENFPGA) && defined(OF_ECWOLF_STARTUP_PROFILE)
 	printf("InitGame: SDL_Init took %lu ms.\n",
 		(unsigned long)(SDL_GetTicks() - stepStart));
 	stepStart = SDL_GetTicks();
@@ -444,13 +712,13 @@ static void InitGame()
 	//
 
 	V_InitFontColors();
-#ifdef OF_ECWOLF_OPENFPGA
+#if defined(OF_ECWOLF_OPENFPGA) && defined(OF_ECWOLF_STARTUP_PROFILE)
 	printf("InitGame: V_InitFontColors took %lu ms.\n",
 		(unsigned long)(SDL_GetTicks() - stepStart));
 	stepStart = SDL_GetTicks();
 #endif
 	G_ParseMapInfo(true);
-#ifdef OF_ECWOLF_OPENFPGA
+#if defined(OF_ECWOLF_OPENFPGA) && defined(OF_ECWOLF_STARTUP_PROFILE)
 	printf("InitGame: G_ParseMapInfo(gameinfo) took %lu ms.\n",
 		(unsigned long)(SDL_GetTicks() - stepStart));
 	stepStart = SDL_GetTicks();
@@ -461,7 +729,10 @@ static void InitGame()
 	//
 
 	TexMan.Init();
-#ifdef OF_ECWOLF_OPENFPGA
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_EarlyStartupScreen(85);
+#endif
+#if defined(OF_ECWOLF_OPENFPGA) && defined(OF_ECWOLF_STARTUP_PROFILE)
 	printf("InitGame: TexMan.Init took %lu ms.\n",
 		(unsigned long)(SDL_GetTicks() - stepStart));
 	printf("InitGame: pre-palette startup took %lu ms.\n",
@@ -483,6 +754,11 @@ static void InitGame()
 //
 
 	BuildTables ();          // trig tables
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_EarlyStartupScreen(100);
+	OF_EarlyStartupBlackout();
+#endif
 
 	// Setup a temporary window so if we have to terminate we don't do extra mode sets
 	VL_SetVGAPlaneMode (true);
@@ -606,10 +882,6 @@ static void SetViewSize (unsigned int screenWidth, unsigned int screenHeight)
 	{
 		width = screenWidth;
 		height = screenHeight;
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-		if(screenWidth == 320 && screenHeight >= 240)
-			height = 200;
-#endif
 	}
 	else if(viewsize == 20)
 	{
@@ -628,34 +900,17 @@ static void SetViewSize (unsigned int screenWidth, unsigned int screenHeight)
 	centerx = viewwidth/2-1;
 	centerxwide = AspectCorrection[r_ratio].isWide ? CorrectWidthFactor(centerx) : centerx;
 	const bool fullScreenView = (unsigned)viewheight == screenHeight;
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	const bool openfpgaLetterboxView =
-		screenWidth == 320 && screenHeight >= 240 &&
-		viewwidth == 320 && viewheight == 200;
-#endif
 	if(fullScreenView)
 		viewscreenx = viewscreeny = screenofs = 0;
 	else
 	{
 		viewscreenx = (screenWidth-viewwidth) / 2;
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-		if(openfpgaLetterboxView)
-			viewscreeny = (screenHeight-viewheight) / 2;
-		else
-#endif
 		viewscreeny = (statusbary2+statusbary1-viewheight)/2;
 		screenofs = viewscreeny*SCREENPITCH+viewscreenx;
 	}
 
 	int virtheight = screenHeight;
 	int virtwidth = screenWidth;
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	if(screenWidth == 320 && screenHeight >= 240 && viewwidth == 320 &&
-		viewheight == 200)
-	{
-		virtheight = 200;
-	}
-#endif
 	if(AspectCorrection[r_ratio].isWide)
 		virtwidth = CorrectWidthFactor(virtwidth);
 	else
@@ -1120,6 +1375,14 @@ static const char* CheckParameters(int argc, char *argv[], TArray<FString> &file
 			}
 			else
 				extension = argv[i];
+		else if(!strcmp(arg, "--saveprefix") || !strcmp(arg, "-saveprefix"))
+			if(++i >= argc)
+			{
+				printf("Expected save prefix!\n");
+				hasError = true;
+			}
+			else
+				GameSave::SetOpenFPGASavePrefix(argv[i]);
 		else IFARG("--file")
 		{
 			if(++i < argc)
@@ -1191,6 +1454,8 @@ static const char* CheckParameters(int argc, char *argv[], TArray<FString> &file
 			" --savedir <dir>        Use an explicit location for save games\n"
 			" --file <file>          Loads an extra data file\n"
 			" --data <extension>     Selects the given game data set skipping the dialog\n"
+			" --saveprefix <prefix>  Selects the OpenFPGA save filename prefix\n"
+			" -saveprefix <prefix>   Same as --saveprefix\n"
 			" --tedlevel <level>     Starts the game in the given level\n"
 			" --skill <#>            Sets the difficulty for tedlevel\n"
 			" --baby                 Sets the difficulty to baby for tedlevel\n"
@@ -1226,7 +1491,7 @@ static const char* CheckParameters(int argc, char *argv[], TArray<FString> &file
 
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	screenWidth = 320;
-	screenHeight = 240;
+	screenHeight = 200;
 	fullscreen = false;
 #endif
 
@@ -1346,6 +1611,10 @@ int WL_Main (int argc, char *argv[])
 		// to the system locale.
 		setlocale(LC_ALL, "C");
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		OF_EarlyStartupScreen(8);
+#endif
+
 		FileSys::SetupPaths(argc, argv);
 
 		// Find the program directory.
@@ -1356,6 +1625,9 @@ int WL_Main (int argc, char *argv[])
 		printf("ReadConfig: Reading the Configuration.\n");
 		config.LocateConfigFile(argc, argv);
 		ReadConfig();
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		OF_EarlyStartupScreen(18);
+#endif
 
 		{
 			TArray<FString> wadfiles, files;
@@ -1363,6 +1635,9 @@ int WL_Main (int argc, char *argv[])
 			Printf("IWad: Selecting base game data.\n");
 			const char* extension = CheckParameters(argc, argv, wadfiles);
 			IWad::SelectGame(files, extension, MAIN_PK3, progdir);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+			OF_EarlyStartupScreen(35);
+#endif
 
 			for(unsigned int i = 0;i < wadfiles.Size();++i)
 				files.Push(wadfiles[i]);
@@ -1375,12 +1650,18 @@ int WL_Main (int argc, char *argv[])
 			Wads.InitMultipleFiles(files);
 			LumpRemapper::RemapAll();
 			language.SetupStrings();
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+			OF_EarlyStartupScreen(55);
+#endif
 		}
 
 		R_InitRenderer();
 
 		printf("InitGame: Setting up the game...\n");
 		rngseed = I_MakeRNGSeed(); // May change after initializing a net game
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		OF_EarlyStartupScreen(70);
+#endif
 		InitGame();
 
 		FRandom::StaticClearRandom();

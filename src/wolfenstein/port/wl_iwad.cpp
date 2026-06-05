@@ -137,6 +137,8 @@ static bool CheckHidden(const IWadData &data)
 			!!(data.Flags & IWad::RESOURCE);
 }
 
+static FString MakeDataPath(const char *directory, const FString &filename);
+
 // Identifies the IWAD by examining the lumps against the possible requirements.
 // Returns -1 if it isn't identifiable.
 static int CheckData(WadStuff &wad)
@@ -173,8 +175,7 @@ static bool CheckStandalone(const char* directory, FString filename, FString ext
 		if(filename.CompareNoCase(iwadNames[i]) != 0)
 			continue;
 
-		FString path;
-		path.Format("%s/%s", directory, filename.GetChars());
+		FString path = MakeDataPath(directory, filename);
 		TUniquePtr<FResourceFile> file(FResourceFile::OpenResourceFile(path, NULL, true));
 		if(file)
 		{
@@ -282,6 +283,69 @@ static FString NormalizeExtensionName(const char *extension)
 	return FString(extension);
 }
 
+static FString MakeDataPath(const char *directory, const FString &filename)
+{
+	if(directory == NULL || directory[0] == 0 || strcmp(directory, PATH_SEPARATOR) == 0)
+		return filename;
+
+	FString path;
+	path.Format("%s" PATH_SEPARATOR "%s", directory, filename.GetChars());
+	return path;
+}
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+static int FindIWadTypeByName(const char *name)
+{
+	for(unsigned int i = 0;i < iwadTypes.Size();++i)
+	{
+		if(iwadTypes[i].Name.CompareNoCase(name) == 0)
+			return i;
+	}
+	return -1;
+}
+
+static int GetOpenFPGAIWadType(const FString &extension)
+{
+	if(extension.CompareNoCase("wl6") == 0)
+		return FindIWadTypeByName("Wolfenstein 3D");
+	if(extension.CompareNoCase("wl1") == 0 || extension.CompareNoCase("wl3") == 0)
+		return FindIWadTypeByName("Wolfenstein 3D Shareware");
+	if(extension.CompareNoCase("sod") == 0)
+		return FindIWadTypeByName("Spear of Destiny");
+	if(extension.CompareNoCase("sdm") == 0)
+		return FindIWadTypeByName("Spear of Destiny Demo");
+	if(extension.CompareNoCase("sd2") == 0)
+		return FindIWadTypeByName("Mission 2: Return to Danger");
+	if(extension.CompareNoCase("sd3") == 0)
+		return FindIWadTypeByName("Mission 3: Ultimate Challenge");
+	if(extension.CompareNoCase("n3d") == 0)
+		return FindIWadTypeByName("Super 3D Noah's Ark");
+	return -1;
+}
+
+static FString OpenFPGABaseName(const FString &name)
+{
+	int lastSlash = name.LastIndexOfAny("/\\:");
+	return lastSlash == -1 ? name : name.Mid(lastSlash+1);
+}
+
+static bool OpenFPGAIsBaseDataName(const FString &name)
+{
+	FString base = OpenFPGABaseName(name);
+	static const char* const BaseNames[] = {
+		"audiohed", "audiot", "gamemaps", "maptemp",
+		"maphead", "vgadict", "vgahead", "vgagraph", "vswap"
+	};
+
+	for(unsigned int i = 0;i < countof(BaseNames);++i)
+	{
+		if(base.CompareNoCase(BaseNames[i]) == 0)
+			return true;
+	}
+	return false;
+}
+#endif
+
 /* Steam ships Spear of Destiny in the mission pack 3 state, so we need to go
  * and correct steam installs.
  *
@@ -353,38 +417,32 @@ static void LookForGameData(FResourceFile *res, TArray<WadStuff> &iwads, const c
 
 	TArray<FString> files;
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	// APF data slots resolve via fopen-by-name, but the OS neither lists them
-	// through readdir nor stats the virtual root as a directory, so
-	// dir.exists()/getFileList() are useless here (and the dir.exists() guard
-	// below would bail out). Probe the known base-game filenames directly,
-	// using the same path string the loader will use, so IWAD auto-detection
-	// works with loose data files and no mounted disc image. Only the extension
-	// the active instance actually bound will open.
+	// Use the APF filenames exposed by the active instance.  Mission packs can
+	// use physical filenames such as SOD-M2/GAMEMAPS.SOD while the ECWolf data
+	// set is logically .sd2/.sd3, so discovery must keep the real filename for
+	// opens while grouping the files under the requested logical extension.
+	files = dir.getFileList();
+	if(files.Size() == 0)
 	{
 		static const char* const ProbeNames[] = {
 			"audiohed", "audiot", "gamemaps", "maphead",
 			"vgadict", "vgahead", "vgagraph", "vswap"
 		};
-		static const char* const ProbeExts[] = {
-			"wl6", "wl1", "wl3", "sod", "sd1", "sd2", "sd3", "sdm", "n3d"
-		};
+		FString probeExt = NormalizeExtensionName(getenv("ECWOLF_DATA_EXT"));
+		if(probeExt.IsEmpty())
+			probeExt = "wl6";
+
 		for(unsigned int n = 0;n < sizeof(ProbeNames)/sizeof(ProbeNames[0]);++n)
 		{
-			for(unsigned int e = 0;e < sizeof(ProbeExts)/sizeof(ProbeExts[0]);++e)
+			FString fname;
+			fname.Format("%s.%s", ProbeNames[n], probeExt.GetChars());
+			FString probePath = MakeDataPath(directory, fname);
+			if(FILE *probe = fopen(probePath.GetChars(), "rb"))
 			{
-				FString fname;
-				fname.Format("%s.%s", ProbeNames[n], ProbeExts[e]);
-				FString probePath;
-				probePath.Format("%s" PATH_SEPARATOR "%s", directory, fname.GetChars());
-				if(FILE *probe = fopen(probePath.GetChars(), "rb"))
-				{
-					fclose(probe);
-					files.Push(fname);
-				}
+				fclose(probe);
+				files.Push(fname);
 			}
 		}
-		printf("OpenFPGA: IWAD probe found %u base file(s) in '%s'.\n",
-			files.Size(), directory);
 	}
 #endif
 
@@ -404,6 +462,17 @@ static void LookForGameData(FResourceFile *res, TArray<WadStuff> &iwads, const c
 		FString name, extension;
 		if(!SplitFilename(files[i], name, extension))
 			continue;
+		FString dataName = name;
+		FString dataExtension = extension;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		dataName = OpenFPGABaseName(name);
+		if(OpenFPGAIsBaseDataName(dataName))
+		{
+			FString logicalExtension = NormalizeExtensionName(getenv("ECWOLF_DATA_EXT"));
+			if(logicalExtension.IsNotEmpty())
+				dataExtension = logicalExtension;
+		}
+#endif
 
 		if(CheckStandalone(directory, files[i], extension, iwads))
 			continue;
@@ -412,9 +481,9 @@ static void LookForGameData(FResourceFile *res, TArray<WadStuff> &iwads, const c
 		for(unsigned int j = 0;j < foundFiles.Size();++j)
 		{
 			#if ISCASEINSENSITIVE
-			if(foundFiles[j].extension.CompareNoCase(extension) == 0)
+			if(foundFiles[j].extension.CompareNoCase(dataExtension) == 0)
 			#else
-			if(foundFiles[j].extension.Compare(extension) == 0)
+			if(foundFiles[j].extension.Compare(dataExtension) == 0)
 			#endif
 			{
 				base = &foundFiles[j];
@@ -425,7 +494,7 @@ static void LookForGameData(FResourceFile *res, TArray<WadStuff> &iwads, const c
 		{
 			int index = foundFiles.Push(BaseFile());
 			base = &foundFiles[index];
-			base->extension = extension;
+			base->extension = dataExtension;
 			base->isValid = 0;
 		}
 
@@ -434,9 +503,9 @@ static void LookForGameData(FResourceFile *res, TArray<WadStuff> &iwads, const c
 		{
 			for(const char* const * nameCheck = BaseFileNames[baseName];*nameCheck;++nameCheck)
 			{
-				if(name.CompareNoCase(*nameCheck) == 0)
+				if(dataName.CompareNoCase(*nameCheck) == 0)
 				{
-					base->filename[baseName].Format("%s" PATH_SEPARATOR "%s", directory, files[i].GetChars());
+					base->filename[baseName] = MakeDataPath(directory, files[i]);
 					base->isValid |= 1<<baseName;
 
 					baseName = BASEFILES;
@@ -470,6 +539,19 @@ static void LookForGameData(FResourceFile *res, TArray<WadStuff> &iwads, const c
 				LumpRemapper::LoadMap(foundFiles[i].extension, lump->FullName, (const char*) lump->CacheLump(), lump->LumpSize);
 		}
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		const int openFpgaType = GetOpenFPGAIWadType(foundFiles[i].extension);
+		if(openFpgaType >= 0 && (foundFiles[i].isValid & FILE_REQMASK) == FILE_REQMASK)
+		{
+			wadStuff.Type = openFpgaType;
+			wadStuff.Name = iwadTypes[openFpgaType].Name;
+			wadStuff.Hidden = CheckHidden(iwadTypes[openFpgaType]);
+			if(CheckIWadNotYetFound(iwads, wadStuff.Type))
+				iwads.Push(wadStuff);
+			continue;
+		}
+#endif
+
 		if(CheckData(wadStuff) > -1)
 		{
 			// Check to ensure there are no duplicates
@@ -496,6 +578,15 @@ static void CheckForExpansionRequirements(TArray<WadStuff> &iwads)
 	{
 		if(iwadTypes[iwads[i].Type].Required.Size() == 0)
 			continue;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		const FString openFpgaExtension = NormalizeExtensionName(getenv("ECWOLF_DATA_EXT"));
+		if((openFpgaExtension.CompareNoCase("sd2") == 0 ||
+			openFpgaExtension.CompareNoCase("sd3") == 0) &&
+			iwads[i].Extension.CompareNoCase(openFpgaExtension) == 0)
+		{
+			continue;
+		}
+#endif
 
 		bool reqSatisfied = false;
 		for(unsigned int j = 0;!reqSatisfied && j < iwadTypes[iwads[i].Type].Required.Size();++j)
@@ -667,6 +758,12 @@ void SelectGame(TArray<FString> &wadfiles, const char* iwad, const char* datawad
 
 	ParseIWadInfo(datawadRes);
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	FString requestedDataExtension = NormalizeExtensionName(iwad);
+	if(requestedDataExtension.IsNotEmpty())
+		setenv("ECWOLF_DATA_EXT", requestedDataExtension.GetChars(), 1);
+#endif
+
 	// Get a list of potential data paths
 	FString dataPaths;
 	if(config.GetSetting("BaseDataPaths") == NULL)
@@ -726,6 +823,7 @@ void SelectGame(TArray<FString> &wadfiles, const char* iwad, const char* datawad
 	}
 	while(split != 0);
 
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 #if !defined(__APPLE__) && !defined(_WIN32)
 	LookForGameData(datawadRes, basefiles, "/usr/share/games/wolf3d");
 	LookForGameData(datawadRes, basefiles, "/usr/local/share/games/wolf3d");
@@ -813,6 +911,7 @@ void SelectGame(TArray<FString> &wadfiles, const char* iwad, const char* datawad
 			}
 		}
 	}
+#endif
 
 	delete datawadRes;
 
@@ -821,7 +920,9 @@ void SelectGame(TArray<FString> &wadfiles, const char* iwad, const char* datawad
 	CheckForExpansionRequirements(basefiles);
 
 	// Now search for any applicable level sets
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 	CheckForLevelSets(basefiles);
+#endif
 
 	// Remove hidden options
 	for(unsigned int i = basefiles.Size();i-- > 0;)
@@ -832,7 +933,7 @@ void SelectGame(TArray<FString> &wadfiles, const char* iwad, const char* datawad
 
 	if(basefiles.Size() == 0)
 	{
-		I_Error("Can not find base game data. (*.wl6, *.wl1, *.sdm, *.sod, *.n3d)");
+		I_Error("Can not find base game data. (*.wl6, *.wl1, *.sdm, *.sod, *.sd2, *.sd3, *.n3d)");
 	}
 
 	int pick = -1;

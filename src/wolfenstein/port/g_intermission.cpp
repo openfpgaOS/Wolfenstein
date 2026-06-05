@@ -50,6 +50,7 @@
 #include "wl_net.h"
 #include "wl_play.h"
 #include "thingdef/thingdef.h"
+#include "of_ecwolf_gpu.h"
 
 static TMap<FName, IntermissionInfo> intermissions;
 
@@ -201,7 +202,12 @@ static bool R_CastZoomer(const Frame *frame, CastIntermissionAction *cast)
 			break;
 
 		if(intermissionMapLoaded)
+		{
 			ThreeDRefresh();
+			// The zoomer draws with the CPU into the live frame; close the
+			// GPU frame first so the writes are coherently published.
+			OF_WolfGPU_FallbackToCPU();
+		}
 		else
 		{
 			// Unlike a 3D view, we will overwrite the whole screen here

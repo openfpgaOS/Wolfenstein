@@ -1,0 +1,107 @@
+{
+    "instance": {
+        "magic": "APF_VER_1",
+        "variant_select": {
+            "id": 666,
+            "select": false
+        },
+        "data_slots": [
+            {
+                "id": 1,
+                "filename": "os.bin"
+            },
+            {
+                "id": 2,
+                "filename": "spear-m3.ini"
+            },
+            {
+                "id": 3,
+                "filename": "wolfenstein.elf"
+            },
+            {
+                "id": 4,
+                "filename": "wolfmidi.zip"
+            },
+            {
+                "id": 5,
+                "filename": "SOD-M3/AUDIOHED.SOD"
+            },
+            {
+                "id": 6,
+                "filename": "SOD-M3/AUDIOT.SOD"
+            },
+            {
+                "id": 7,
+                "filename": "bank.ofsf"
+            },
+            {
+                "id": 8,
+                "filename": "ecwolf.cfg"
+            },
+            {
+                "id": 10,
+                "filename": "SpearM3_0.sav"
+            },
+            {
+                "id": 11,
+                "filename": "SpearM3_1.sav"
+            },
+            {
+                "id": 12,
+                "filename": "SpearM3_2.sav"
+            },
+            {
+                "id": 13,
+                "filename": "SpearM3_3.sav"
+            },
+            {
+                "id": 14,
+                "filename": "SpearM3_4.sav"
+            },
+            {
+                "id": 15,
+                "filename": "SpearM3_5.sav"
+            },
+            {
+                "id": 16,
+                "filename": "SpearM3_6.sav"
+            },
+            {
+                "id": 17,
+                "filename": "SpearM3_7.sav"
+            },
+            {
+                "id": 18,
+                "filename": "SpearM3_8.sav"
+            },
+            {
+                "id": 19,
+                "filename": "SpearM3_9.sav"
+            },
+            {
+                "id": 20,
+                "filename": "SOD-M3/MAPHEAD.SOD"
+            },
+            {
+                "id": 21,
+                "filename": "SOD-M3/VGADICT.SOD"
+            },
+            {
+                "id": 22,
+                "filename": "SOD-M3/VGAGRAPH.SOD"
+            },
+            {
+                "id": 23,
+                "filename": "SOD-M3/VGAHEAD.SOD"
+            },
+            {
+                "id": 24,
+                "filename": "SOD-M3/VSWAP.SOD"
+            },
+            {
+                "id": 25,
+                "filename": "SOD-M3/GAMEMAPS.SOD"
+            }
+        ]
+    }
+}

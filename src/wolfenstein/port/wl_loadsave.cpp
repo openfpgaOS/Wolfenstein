@@ -33,6 +33,9 @@
 */
 
 #include <ctime>
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#include "of_file.h"
+#endif
 #include "config.h"
 #include "c_cvars.h"
 #include "farchive.h"
@@ -60,6 +63,7 @@
 #include "wl_net.h"
 #include "wl_play.h"
 #include "textures/textures.h"
+#include "of_ecwolf_gpu.h"
 
 void R_RenderView();
 extern byte* vbuf;
@@ -87,6 +91,11 @@ struct SaveFile
 TArray<SaveFile> SaveFile::files;
 
 static bool quickSaveLoad = false;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+static const unsigned int OpenFPGASaveSlots = 10;
+static char openFPGASavePrefix[49];
+static bool openFPGASavePrefixSet = false;
+#endif
 
 static inline FString GetFullSaveFileName(const FString &filename)
 {
@@ -96,6 +105,57 @@ static inline FString GetFullSaveFileName(const FString &filename)
 static inline FILE *OpenSaveFile(const FString &filename, const char* mode)
 {
 	return File(GetFullSaveFileName(filename)).open(mode);
+}
+
+void SetOpenFPGASavePrefix(const char *prefix)
+{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	if(prefix == NULL || prefix[0] == '\0')
+		return;
+
+	const char *base = prefix;
+	for(const char *p = prefix; *p; ++p)
+	{
+		if(*p == '/' || *p == '\\')
+			base = p + 1;
+	}
+
+	unsigned int len = 0;
+	while(base[len] != '\0' && base[len] != '.' && len < sizeof(openFPGASavePrefix) - 1)
+	{
+		openFPGASavePrefix[len] = base[len];
+		++len;
+	}
+
+	if(len == 0)
+		return;
+
+	openFPGASavePrefix[len] = '\0';
+	openFPGASavePrefixSet = true;
+
+	char filename[64];
+	for(unsigned int i = 0;i < OpenFPGASaveSlots;i++)
+	{
+		snprintf(filename, sizeof(filename), "%s_%u.sav", openFPGASavePrefix, i);
+		of_file_slot_register(10 + i, filename);
+	}
+#else
+	(void)prefix;
+#endif
+}
+
+static FString BuildSaveFilename(unsigned int slot)
+{
+	FString filename;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	if(openFPGASavePrefixSet)
+	{
+		filename.Format("%s_%u.sav", openFPGASavePrefix, slot);
+		return filename;
+	}
+#endif
+	filename.Format("savegam%u.sav", slot);
+	return filename;
 }
 
 #define MAX_SAVENAME 31
@@ -229,6 +289,7 @@ protected:
 };
 
 MENU_LISTENER(BeginEditSave);
+MENU_LISTENER(BeginNewSave);
 MENU_LISTENER(LoadSaveGame);
 MENU_LISTENER(PerformSaveGame);
 
@@ -240,11 +301,85 @@ Menu &GetSaveMenu() { return saveGame; }
 MenuItem *GetLoadMenuItem() { return loadItem; }
 MenuItem *GetSaveMenuItem() { return saveItem; }
 
+static FString BuildDefaultSaveName()
+{
+	FString mapName = (levelInfo != NULL && levelInfo->MapName[0]) ?
+		levelInfo->MapName : gamestate.mapname;
+	if(mapName.IsEmpty())
+		mapName = "MAP";
+	mapName.ToUpper();
+
+	// "MAP01 Jun 4 11:21:33" -- abbreviated month, unpadded day, 24h time
+	// with seconds.  The day is formatted from tm_mday directly: musl's
+	// strftime has no guaranteed no-padding modifier (%-d) and %e space-pads
+	// single digits.
+	char month[8] = "";
+	char clock[12] = "";
+	time_t currentTime = time(NULL);
+	struct tm *timeInfo = localtime(&currentTime);
+	if(timeInfo != NULL &&
+		strftime(month, sizeof(month), "%b", timeInfo) > 0 &&
+		strftime(clock, sizeof(clock), "%H:%M:%S", timeInfo) > 0)
+	{
+		FString name;
+		name.Format("%s %s %d %s", mapName.GetChars(), month,
+			timeInfo->tm_mday, clock);
+		return name;
+	}
+
+	return mapName;
+}
+
+MENU_LISTENER(BeginNewSave)
+{
+	static_cast<SaveSlotMenuItem *> (saveGame[which])->setValue(BuildDefaultSaveName());
+	return true;
+}
+
+// Return `requested`, or a " (2)" / " (3)" ... variant of it if another save
+// already uses that display name (two identical names would be ambiguous in
+// the menu).  excludeIndex skips the slot being overwritten so a save may
+// keep its own name.  The base is truncated when needed so the result still
+// fits MAX_SAVENAME.
+static FString MakeUniqueSaveName(const FString &requested, int excludeIndex)
+{
+	FString name = requested;
+	unsigned int counter = 2;
+	for(;;)
+	{
+		bool collides = false;
+		for(unsigned int j = 0;j < SaveFile::files.Size();j++)
+		{
+			if((int)j == excludeIndex)
+				continue;
+			if(SaveFile::files[j].name.CompareNoCase(name) == 0)
+			{
+				collides = true;
+				break;
+			}
+		}
+		if(!collides || counter >= 1000)
+			return name;
+
+		FString suffix;
+		suffix.Format(" (%u)", counter++);
+		FString base = requested;
+		if(base.Len() + suffix.Len() > MAX_SAVENAME)
+			base.Truncate(MAX_SAVENAME - suffix.Len());
+		name = base + suffix;
+	}
+}
+
 //
 // DRAW LOAD/SAVE IN PROGRESS
 //
 static void DrawLSAction (int which)
 {
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_WolfGPU_SetNextVideoFramePreserve(false);
+	return;
+#endif
+
 	DrawWindow (LSA_X, LSA_Y, LSA_W, LSA_H, MENUWIN_BACKGROUND);
 	DrawOutline (LSA_X, LSA_Y, LSA_W, LSA_H, 0, MENUWIN_TOPBORDER);
 	VWB_DrawGraphic (TexMan("M_LDING1"), LSA_X + 8, LSA_Y + 5, MENU_CENTER);
@@ -257,7 +392,12 @@ static void DrawLSAction (int which)
 	else
 		US_Print (BigFont, language["STR_SAVING"]);
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	VH_UpdateScreen(false);
+	OF_WolfGPU_SetNextVideoFramePreserve(false);
+#else
 	VW_UpdateScreen ();
+#endif
 }
 
 // ECWolf <1.4.2 for Windows saved full filepaths due to ZDoom code expecting
@@ -279,14 +419,23 @@ bool SetupSaveGames()
 	bool canLoad = false;
 	char title[MAX_SAVENAME+1];
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	TArray<FString> files;
+	for(unsigned int i = 0;i < OpenFPGASaveSlots;i++)
+		files.Push(BuildSaveFilename(i));
+#else
 	File saveDirectory(FileSys::GetDirectoryPath(FileSys::DIR_Saves));
-	const TArray<FString> &files = saveDirectory.getFileList();
+	const TArray<FString> &saveFiles = saveDirectory.getFileList();
+	TArray<FString> files;
+	for(unsigned int i = 0;i < saveFiles.Size();i++)
+		files.Push(saveFiles[i]);
+#endif
 
 	for(unsigned int i = 0;i < files.Size();i++)
 	{
 		const FString &filename = files[i];
 		if(filename.Len() < 5 ||
-			filename.Mid(filename.Len()-4, 4).Compare(".ecs") != 0)
+			filename.Mid(filename.Len()-4, 4).Compare(".sav") != 0)
 			continue; // Too short or incorrect name
 
 		PNGHandle *png;
@@ -380,7 +529,7 @@ bool SetupSaveGames()
 	loadGame.clear();
 	saveGame.clear();
 
-	MenuItem *newSave = new SaveSlotMenuItem(0, NEW_SAVE, 31, NULL, PerformSaveGame, true);
+	MenuItem *newSave = new SaveSlotMenuItem(0, NEW_SAVE, MAX_SAVENAME, BeginNewSave, PerformSaveGame);
 	newSave->setHighlighted(true);
 	saveGame.addItem(newSave);
 
@@ -412,21 +561,33 @@ MENU_LISTENER(BeginEditSave)
 MENU_LISTENER(PerformSaveGame)
 {
 	SaveFile file;
+	bool newSave = (which == 0);
+	SaveSlotMenuItem *menuItem = NULL;
+	unsigned int slotIndex = 0;
 
-	// Copy the name
+	// Copy the name, disambiguating against the other saves' names (a slot
+	// being overwritten may keep its own).
 	file.name = static_cast<SaveSlotMenuItem *> (saveGame[which])->getValue();
+	file.name = MakeUniqueSaveName(file.name, newSave ? -1 :
+		(int)static_cast<SaveSlotMenuItem *> (loadGame.getIndex(which-1))->slotIndex);
 	file.oldVersion = false;
 	file.hasFiles = true;
-	if(which == 0) // New
+	if(newSave)
 	{
 		static_cast<SaveSlotMenuItem *> (saveGame[which])->setValue(NEW_SAVE);
 
 		// Locate a available filename.  I don't want to assume savegamX.yza so this
 		// might not be the fastest way to do things.
+		bool foundSaveFilename = false;
 		bool nextSaveNumber = false;
-		for(unsigned int i = 0;i < 10000;i++)
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		const unsigned int maxSaveSlots = OpenFPGASaveSlots;
+#else
+		const unsigned int maxSaveSlots = 10000;
+#endif
+		for(unsigned int i = 0;i < maxSaveSlots;i++)
 		{
-			file.filename.Format("savegam%u.ecs", i);
+			file.filename = BuildSaveFilename(i);
 			for(unsigned int j = 0;j < SaveFile::files.Size();j++)
 			{
 				if(stricmp(file.filename, SaveFile::files[j].filename) == 0)
@@ -440,12 +601,28 @@ MENU_LISTENER(PerformSaveGame)
 				nextSaveNumber = false;
 				continue;
 			}
+			foundSaveFilename = true;
 			break;
 		}
 
+		if(!foundSaveFilename)
+			return false;
+	}
+	else
+	{
+		menuItem = static_cast<SaveSlotMenuItem *> (loadGame.getIndex(which-1));
+		slotIndex = menuItem->slotIndex;
+		file.filename = SaveFile::files[menuItem->slotIndex].filename;
+	}
+
+	if(!Save(file.filename, file.name))
+		return false;
+
+	if(newSave)
+	{
 		SaveFile::files.Push(file);
 
-		unsigned int slotIndex = loadGame.getNumItems();
+		slotIndex = loadGame.getNumItems();
 		loadGame.addItem(new SaveSlotMenuItem(slotIndex, file.name, 31, LoadSaveGame));
 		saveGame.addItem(new SaveSlotMenuItem(slotIndex, file.name, 31, BeginEditSave, PerformSaveGame));
 
@@ -456,22 +633,37 @@ MENU_LISTENER(PerformSaveGame)
 	}
 	else
 	{
-		SaveSlotMenuItem *menuItem = static_cast<SaveSlotMenuItem *> (loadGame.getIndex(which-1));
-
-		file.filename = SaveFile::files[menuItem->slotIndex].filename;
 		SaveFile::files[menuItem->slotIndex] = file;
 		loadGame.setCurrentPosition(which-1);
 		menuItem->setValue(file.name);
+		// Keep the save menu's text in sync in case the name was
+		// disambiguated above.
+		static_cast<SaveSlotMenuItem *> (saveGame[which])->setValue(file.name);
 
 		// Ungreen
 		saveGame.getIndex(which)->setHighlighted(0);
 		loadGame.getIndex(which-1)->setHighlighted(0);
 	}
 
-	Save(file.filename, file.name);
-
 	if(!quickSaveLoad)
+	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		if(viewsize == 21)
+			OF_WolfGPU_SetNextVideoFramePreserve(false);
+#endif
 		Menu::closeMenus(true);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		if(ingame && !startgame && !loadedgame)
+		{
+			if(viewsize != 21)
+			{
+				VH_AcquireDeferredScreenLock();
+				DrawPlayScreen();
+			}
+			PlayFrame();
+		}
+#endif
+	}
 
 	return true;
 }
@@ -487,7 +679,12 @@ MENU_LISTENER(LoadSaveGame)
 	Load(SaveFile::files[menuItem->slotIndex].filename);
 
 	if(!quickSaveLoad)
+	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		OF_WolfGPU_SetNextVideoFramePreserve(false);
+#endif
 		Menu::closeMenus(true);
+	}
 	else
 		loadedgame = false;
 
@@ -633,10 +830,14 @@ bool Load(const FString &filename)
 
 void SaveScreenshot(FILE *file)
 {
-	static const int SAVEPICWIDTH = 216;
-	static const int SAVEPICHEIGHT = 162;
+	static const int SAVEPICWIDTH = 320;
+	static const int SAVEPICHEIGHT = 200;
+	static byte saveVbuf[SAVEPICWIDTH*SAVEPICHEIGHT] __attribute__((aligned(64)));
 
-	vbuf = new byte[SAVEPICHEIGHT*SAVEPICWIDTH];
+	byte *oldVbuf = vbuf;
+	unsigned oldVbufPitch = vbufPitch;
+	memset(saveVbuf, GPalette.BlackIndex, SAVEPICHEIGHT*SAVEPICWIDTH);
+	vbuf = saveVbuf;
 	vbufPitch = SAVEPICWIDTH;
 
 	int oldviewsize = viewsize;
@@ -645,12 +846,18 @@ void SaveScreenshot(FILE *file)
 	vid_aspect = ASPECT_16_10;
 	NewViewSize(21, SAVEPICWIDTH, SAVEPICHEIGHT);
 	CalcProjection(players[ConsolePlayer].mo->radius);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_WolfGPU_BeginFrame(vbuf, vbufPitch, SAVEPICHEIGHT);
+#endif
 	R_RenderView();
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	OF_WolfGPU_EndFrame();
+#endif
 
 	M_CreatePNG(file, vbuf, GPalette.BaseColors, SS_PAL, SAVEPICWIDTH, SAVEPICHEIGHT, vbufPitch);
 
-	delete[] vbuf;
-	vbuf = NULL;
+	vbuf = oldVbuf;
+	vbufPitch = oldVbufPitch;
 
 	vid_aspect = oldaspect;
 	NewViewSize(oldviewsize); // Restore

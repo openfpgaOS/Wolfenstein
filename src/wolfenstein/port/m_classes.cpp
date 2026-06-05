@@ -589,7 +589,9 @@ void Menu::closeMenus(bool close)
 	if(close)
 	{
 		MenuFadeOut();
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 		VL_FadeClear();
+#endif
 	}
 
 	Menu::close = close;
@@ -1003,7 +1005,12 @@ int Menu::handle()
 			getIndex(curPos)->activate();
 			PrintX = getX() + getIndent();
 			PrintY = getY() + getHeight(curPos);
-			if(!Menu::areMenusClosed())
+			if(Menu::areMenusClosed())
+			{
+				IN_ClearKeysDown();
+				return curPos;
+			}
+			else
 			{
 				getIndex(curPos)->draw();
 				VW_UpdateScreen();

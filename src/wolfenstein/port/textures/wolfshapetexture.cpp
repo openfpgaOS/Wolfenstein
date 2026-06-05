@@ -38,6 +38,7 @@
 #include "files.h"
 #include "w_wad.h"
 #include "m_swap.h"
+#include "of_ecwolf_gpu.h"
 #include "templates.h"
 #include "v_palette.h"
 #include "textures.h"
@@ -328,6 +329,9 @@ void FWolfShapeTexture::Unload ()
 	{
 		delete[] Pixels;
 		Pixels = NULL;
+		// The freed range may be reused for another texture's composition;
+		// drop the GPU source caches so stale flush state cannot linger.
+		OF_WolfGPU_SourceBuffersChanged();
 	}
 }
 

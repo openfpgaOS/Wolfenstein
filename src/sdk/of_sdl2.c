@@ -1,3 +1,9 @@
+//------------------------------------------------------------------------------
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileType: SOURCE
+// SPDX-FileCopyrightText: (c) 2026, ThinkElastic <Think@Elastic.com>
+//------------------------------------------------------------------------------
+
 /*
  * of_sdl2.c -- the single implementation TU for the openfpgaOS SDL2
  * compatibility layer (declared in <SDL2/SDL.h> and <SDL2/SDL_mixer.h>).

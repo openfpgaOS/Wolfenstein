@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "of_analogizer.h"
 #include "of_cache.h"
 #include "of_caps.h"
 #include "of_gpu.h"
@@ -34,8 +35,41 @@ static int gpu_video_pitch;
 static int gpu_video_height;
 static uint32_t gpu_video_frame_bytes;
 static bool gpu_video_next_frame_preserve = true;
+/* Rows [skip_y0, skip_y1) of the next preserved frame are fully redrawn by
+ * the renderer (full-width 3D view), so the acquire-time preserve copy can
+ * skip them.  Consumed (and reset) by the next buffer acquire. */
+static int gpu_video_preserve_skip_y0;
+static int gpu_video_preserve_skip_y1;
 static bool gpu_video_clean_first_begin;
 static bool gpu_video_compat_logged;
+/* Last (width, height, pitch) validated against the hardware video mode.
+ * Lets the per-frame acquire skip the analogizer/refresh/get-mode service
+ * calls (of_video_set_refresh_vtotal also resets the kernel's adaptive
+ * refresh state, so it must not run every frame).  Cleared on reset. */
+static int gpu_video_mode_ok_w;
+static int gpu_video_mode_ok_h;
+static int gpu_video_mode_ok_pitch;
+
+/* Diagnostics for the transient-artifact hunt (reported in the perf line):
+ *  - rejects: draw helpers refused a primitive while a GPU frame was active
+ *    (those columns are CPU-drawn after a region sync; a high rate means the
+ *    GPU eligibility checks are being missed).
+ *  - fence_late: the previous frame's CMD_FLIP fence had not retired when
+ *    the next buffer acquire started (GPU still drawing into sim time).
+ *  - forced_swaps: the fence still had not retired after acquire returned —
+ *    the kernel's bounded wait expired and it CPU-forced the swap, so a
+ *    partially rendered frame may have been scanned out (visible tear). */
+static uint32_t gpu_dbg_rejects;
+static uint32_t gpu_dbg_fence_late;
+static uint32_t gpu_dbg_forced_swaps;
+
+/* Timestamp (of_time_us) of the last acquire that actually blocked on the
+ * display flip fence.  The flip fence retires when the display consumes the
+ * previous swap, so this is in effect the last vsync as seen by the app --
+ * the render interpolation re-anchors its time sample on it to keep motion
+ * sampling locked to the display clock instead of "now". */
+static uint32_t gpu_video_pace_us;
+static bool gpu_video_pace_valid;
 
 static of_gpu_affine_span_group_t gpu_batch;
 static int gpu_batch_count;
@@ -97,6 +131,9 @@ static unsigned int gpu_source_cache_next;
 static GpuSourceCacheRange gpu_source_cache_last;
 static GpuMaskCacheEntry gpu_mask_cache[gpu_mask_cache_size];
 static GpuMaskCacheEntry gpu_mask_cache_last;
+/* Set when texture pixel buffers were freed/recomposited; the GPU's internal
+ * texture cache is flushed at the next frame start (when the GPU is idle). */
+static bool gpu_tex_flush_pending;
 
 #if OF_ECWOLF_PERF_ENABLED
 static uint64_t wolf_perf_accum[OF_WOLF_PERF_COUNT];
@@ -163,7 +200,7 @@ void OF_WolfPerf_FrameEnd(void)
 	const unsigned int frame_avg =
 		(unsigned int)(wolf_perf_frame_total / wolf_perf_frames);
 
-	printf("perf %u.%u fr=%u ev=%u sim=%u sn=%u ctl=%u spn=%u th=%u fin=%u gc=%u r=%u lk=%u bg=%u cl=%u rm=%u st=%u wl=%u fl=%u sk=%u spr=%u wp=%u ul=%u ov=%u pr=%u aq=%u sd=%u mt=%u gw=%u t=%u.%u\n",
+	printf("perf %u.%u fr=%u ev=%u sim=%u sn=%u ctl=%u spn=%u th=%u fin=%u gc=%u r=%u lk=%u bg=%u cl=%u rm=%u st=%u wl=%u fl=%u sk=%u spr=%u wp=%u ul=%u ov=%u pr=%u aq=%u sd=%u mt=%u gw=%u rj=%u lt=%u fw=%u t=%u.%u\n",
 		fps_x10 / 10, fps_x10 % 10, frame_avg,
 		wolf_perf_avg(OF_WOLF_PERF_EVENTS),
 		wolf_perf_avg(OF_WOLF_PERF_SIM),
@@ -191,6 +228,9 @@ void OF_WolfPerf_FrameEnd(void)
 		wolf_perf_avg(OF_WOLF_PERF_SOUND),
 		wolf_perf_avg(OF_WOLF_PERF_MAINT),
 		wolf_perf_avg(OF_WOLF_PERF_GPU_FINISH),
+		(unsigned int)gpu_dbg_rejects,
+		(unsigned int)gpu_dbg_fence_late,
+		(unsigned int)gpu_dbg_forced_swaps,
 		tics_x10 / 10, tics_x10 % 10);
 
 	memset(wolf_perf_accum, 0, sizeof(wolf_perf_accum));
@@ -198,12 +238,24 @@ void OF_WolfPerf_FrameEnd(void)
 	wolf_perf_tic_total = 0;
 	wolf_perf_window_start_us = now;
 	wolf_perf_frames = 0;
+	gpu_dbg_rejects = 0;
+	gpu_dbg_fence_late = 0;
+	gpu_dbg_forced_swaps = 0;
 }
 #endif
 
 static bool gpu_is_power_of_two(int value)
 {
 	return value > 0 && (value & (value - 1)) == 0;
+}
+
+/* A draw helper refused a primitive.  Only counted while a GPU frame is
+ * active: rejects during legitimate CPU phases (menus, automap) are normal. */
+static bool gpu_reject(void)
+{
+	if(gpu_frame_active)
+		gpu_dbg_rejects++;
+	return false;
 }
 
 static void gpu_flush_batch()
@@ -603,17 +655,17 @@ static bool gpu_add_affine(uint8_t *dest, int count, const uint8_t *source,
 	if(!gpu_available || !gpu_frame_active)
 		return false;
 	if(dest == NULL || source == NULL || count <= 0 || count > 4095)
-		return false;
+		return gpu_reject();
 	if(light < 0 || light >= NUMCOLORMAPS)
-		return false;
+		return gpu_reject();
 	if(!gpu_is_power_of_two(tex_width) ||
 		!gpu_is_power_of_two(tex_w_mask + 1) ||
 		!gpu_is_power_of_two(tex_h_mask + 1))
 	{
-		return false;
+		return gpu_reject();
 	}
 	if(!gpu_region_within_active_frame(dest, count, fb_step))
-		return false;
+		return gpu_reject();
 
 	gpu_prepare_for_gpu_write();
 
@@ -705,6 +757,21 @@ void OF_WolfGPU_Shutdown(void)
 	gpu_reset_source_cache();
 }
 
+void OF_WolfGPU_ApplyRefreshPolicy(void)
+{
+	of_analogizer_state_t analogizer;
+	const bool analogizerEnabled =
+		of_analogizer_state(&analogizer) == 0 && analogizer.enabled;
+	/* 60 Hz (Doom parity): the display consumes one swap per refresh, so the
+	 * refresh rate is the present cap.  70 Hz tics on a 50 Hz panel meant a
+	 * 1,1,2 tic beat every three frames; at 60 Hz the double-tic frame drops
+	 * to roughly one in six and display latency shrinks. */
+	const uint32_t vtotal = analogizerEnabled ?
+		OF_VIDEO_VTOTAL_AUTO : OF_VIDEO_VTOTAL_60HZ;
+
+	of_video_set_refresh_vtotal(vtotal);
+}
+
 void OF_WolfGPU_ResetVideoFrames(void)
 {
 	gpu_video_initialized = false;
@@ -717,6 +784,13 @@ void OF_WolfGPU_ResetVideoFrames(void)
 	gpu_video_pitch = 0;
 	gpu_video_height = 0;
 	gpu_video_frame_bytes = 0;
+	gpu_video_preserve_skip_y0 = 0;
+	gpu_video_preserve_skip_y1 = 0;
+	gpu_video_mode_ok_w = 0;
+	gpu_video_mode_ok_h = 0;
+	gpu_video_mode_ok_pitch = 0;
+	gpu_video_pace_us = 0;
+	gpu_video_pace_valid = false;
 	gpu_video_clean_first_begin = false;
 	gpu_track_base = NULL;
 	gpu_track_bytes = 0;
@@ -730,12 +804,21 @@ bool OF_WolfGPU_CanUseVideoFrames(int width, int height)
 	if(!gpu_available || width <= 0 || height <= 0)
 		return false;
 
+	/* Fast path: the hardware mode was already validated for this size.
+	 * Skipping the slow path matters beyond the service-call cost --
+	 * of_video_set_refresh_vtotal (via ApplyRefreshPolicy) resets the
+	 * kernel's adaptive-refresh bookkeeping, so it must not run per frame. */
+	if(width == gpu_video_mode_ok_w && height == gpu_video_mode_ok_h)
+		return true;
+
+	OF_WolfGPU_ApplyRefreshPolicy();
+
 	of_video_mode_t mode;
 	of_video_get_mode(&mode);
 
 	/* The app renders into a width x height 8-bit framebuffer and presents it
 	 * through the GPU page flip; that needs the ACTIVE hardware video mode to
-	 * match exactly. The app forces its surface to 320x240 (c_cvars.cpp) but
+	 * match exactly. The app forces its surface to 320x200 (c_cvars.cpp) but
 	 * never sets the hardware mode -- it relies on the boot-default scaler,
 	 * which an openfpgaOS resync can change. On a mismatch SDLFB falls back to
 	 * a per-frame CPU software-scaling present (GPfx.Convert), which is slow
@@ -755,6 +838,7 @@ bool OF_WolfGPU_CanUseVideoFrames(int width, int height)
 			want.stride = 0;
 			want.color_mode = OF_VIDEO_MODE_8BIT;
 			of_video_set_mode(&want);
+			OF_WolfGPU_ApplyRefreshPolicy();
 			of_video_get_mode(&mode);
 			printf("OpenFPGA GPU: set video mode %dx%d 8bit -> got %ux%u color=%u.\n",
 				width, height, (unsigned)mode.width, (unsigned)mode.height,
@@ -783,6 +867,9 @@ bool OF_WolfGPU_CanUseVideoFrames(int width, int height)
 		return false;
 	}
 
+	gpu_video_mode_ok_w = width;
+	gpu_video_mode_ok_h = height;
+	gpu_video_mode_ok_pitch = mode.stride ? (int)mode.stride : (int)mode.width;
 	return true;
 }
 
@@ -791,13 +878,52 @@ void OF_WolfGPU_SetNextVideoFramePreserve(bool preserve)
 	gpu_video_next_frame_preserve = preserve;
 }
 
+/* Rows [y0, y1) of the next frame are fully redrawn by the renderer, so the
+ * acquire-time preserve copy may skip them (e.g. a full-width 3D view above
+ * the status bar).  One-shot: consumed by the next buffer acquire. */
+void OF_WolfGPU_SetNextVideoFramePreserveExcludeRows(int y0, int y1)
+{
+	gpu_video_preserve_skip_y0 = y0;
+	gpu_video_preserve_skip_y1 = y1;
+}
+
+/* Microseconds elapsed since the last buffer acquire blocked on the display
+ * flip (~the last vsync).  Returns false if the last acquire didn't block
+ * (the game is running slower than the display), in which case the caller
+ * should fall back to wall-clock sampling. */
+bool OF_WolfGPU_USSinceDisplaySync(uint32_t *us_out)
+{
+	if(!gpu_video_pace_valid)
+		return false;
+	if(us_out != NULL)
+		*us_out = of_time_us() - gpu_video_pace_us;
+	return true;
+}
+
+bool OF_WolfGPU_FlipVideoBuffer(int idx, uint32_t *token)
+{
+	OF_WolfGPU_Init();
+	if(!gpu_available || idx < 0)
+		return false;
+
+	const uint32_t flipToken = of_gpu_flip_to(idx);
+	of_gpu_kick();
+	if(token != NULL)
+		*token = flipToken;
+	return true;
+}
+
 static bool gpu_acquire_video_draw_buffer(int width, int height)
 {
 	if(gpu_video_draw_idx >= 0 && gpu_video_draw_fb != NULL)
 		return true;
 
 	const bool preserve = gpu_video_next_frame_preserve;
+	int skip_y0 = gpu_video_preserve_skip_y0;
+	int skip_y1 = gpu_video_preserve_skip_y1;
 	gpu_video_next_frame_preserve = true;
+	gpu_video_preserve_skip_y0 = 0;
+	gpu_video_preserve_skip_y1 = 0;
 
 	int draw_idx;
 	if(!gpu_video_initialized)
@@ -807,8 +933,34 @@ static bool gpu_acquire_video_draw_buffer(int width, int height)
 	}
 	else if(gpu_video_acquire_pending)
 	{
+		/* CMD_FLIP only retires once the display consumed the previous swap
+		 * (one swap per refresh -- FIFO, not mailbox), so when the game
+		 * outpaces the display this fence is where the loop blocks.  Wait
+		 * for it HERE with a generous bound: the kernel's own acquire wait
+		 * gives up after ~5 ms and then CPU-forces the swap, which can scan
+		 * out a frame the GPU is still presenting (visible hiccup/tear).
+		 * fence_late counts pacing blocks; forced_swaps should stay zero. */
+		const bool fence_late =
+			!of_gpu_fence_reached(gpu_video_acquire_token);
+		if(fence_late)
+		{
+			gpu_dbg_fence_late++;
+			const uint32_t wait_start = of_time_us();
+			while(!of_gpu_fence_reached(gpu_video_acquire_token) &&
+				(uint32_t)(of_time_us() - wait_start) < 50000u)
+			{
+			}
+			gpu_video_pace_us = of_time_us();
+			gpu_video_pace_valid = true;
+		}
+		else
+		{
+			gpu_video_pace_valid = false;
+		}
 		draw_idx = of_video_acquire_next(gpu_video_acquire_idx,
 			gpu_video_acquire_token);
+		if(fence_late && !of_gpu_fence_reached(gpu_video_acquire_token))
+			gpu_dbg_forced_swaps++;
 		gpu_video_acquire_pending = false;
 		gpu_video_acquire_idx = -1;
 		gpu_video_acquire_token = 0;
@@ -831,30 +983,62 @@ static bool gpu_acquire_video_draw_buffer(int width, int height)
 		return false;
 	}
 
-	of_video_mode_t mode;
-	of_video_get_mode(&mode);
-	int pitch = mode.stride ? (int)mode.stride : (int)mode.width;
-	if(mode.width != (uint16_t)width || mode.height != (uint16_t)height ||
-		mode.color_mode != OF_VIDEO_MODE_8BIT || pitch <= 0)
+	/* The hardware mode was validated by OF_WolfGPU_CanUseVideoFrames just
+	 * before this call; use the cached pitch instead of re-reading the mode
+	 * every frame.  Falls back to a live read if the cache is cold. */
+	int pitch = gpu_video_mode_ok_pitch;
+	if(width != gpu_video_mode_ok_w || height != gpu_video_mode_ok_h ||
+		pitch <= 0)
 	{
-		OF_WolfGPU_ResetVideoFrames();
-		return false;
+		of_video_mode_t mode;
+		of_video_get_mode(&mode);
+		pitch = mode.stride ? (int)mode.stride : (int)mode.width;
+		if(mode.width != (uint16_t)width || mode.height != (uint16_t)height ||
+			mode.color_mode != OF_VIDEO_MODE_8BIT || pitch <= 0)
+		{
+			OF_WolfGPU_ResetVideoFrames();
+			return false;
+		}
 	}
 
 	uint32_t frame_bytes = (uint32_t)pitch * (uint32_t)height;
-	bool wrote_preserved_frame = false;
 	if(preserve && gpu_video_last_fb != NULL && gpu_video_last_fb != draw_fb)
 	{
-		memcpy(draw_fb, gpu_video_last_fb, frame_bytes);
-		wrote_preserved_frame = true;
+		/* Rows [skip_y0, skip_y1) will be fully redrawn by the renderer, so
+		 * only the head (rows above the view) and tail (status bar / border
+		 * rows below it) need to be carried over from the last frame. */
+		if(skip_y0 < 0)
+			skip_y0 = 0;
+		if(skip_y1 > height)
+			skip_y1 = height;
+		if(skip_y0 >= skip_y1)
+		{
+			memcpy(draw_fb, gpu_video_last_fb, frame_bytes);
+			of_cache_flush_range(draw_fb, frame_bytes);
+		}
+		else
+		{
+			const uint32_t head_bytes = (uint32_t)skip_y0 * (uint32_t)pitch;
+			const uint32_t tail_off = (uint32_t)skip_y1 * (uint32_t)pitch;
+			if(head_bytes != 0)
+			{
+				memcpy(draw_fb, gpu_video_last_fb, head_bytes);
+				of_cache_flush_range(draw_fb, head_bytes);
+			}
+			if(tail_off < frame_bytes)
+			{
+				memcpy(draw_fb + tail_off, gpu_video_last_fb + tail_off,
+					frame_bytes - tail_off);
+				of_cache_flush_range(draw_fb + tail_off,
+					frame_bytes - tail_off);
+			}
+		}
 	}
 	else if(preserve && gpu_video_last_fb == NULL)
 	{
 		memset(draw_fb, 0, frame_bytes);
-		wrote_preserved_frame = true;
-	}
-	if(wrote_preserved_frame)
 		of_cache_flush_range(draw_fb, frame_bytes);
+	}
 
 	gpu_video_draw_idx = draw_idx;
 	gpu_video_draw_fb = draw_fb;
@@ -951,6 +1135,15 @@ void OF_WolfGPU_BeginFrame(uint8_t *framebuffer, int pitch, int height)
 
 	OF_WolfGPU_EndFrame();
 
+	/* Texture buffers changed since the last frame: drop the GPU's internal
+	 * texture cache now, while the GPU is idle (the flip fence and EndFrame
+	 * above guarantee no in-flight sampling). */
+	if(gpu_tex_flush_pending)
+	{
+		GPU_TEX_FLUSH = 1;
+		gpu_tex_flush_pending = false;
+	}
+
 	gpu_framebuffer = framebuffer;
 	gpu_pitch = pitch;
 	gpu_height = height;
@@ -985,11 +1178,10 @@ void OF_WolfGPU_BeginFrame(uint8_t *framebuffer, int pitch, int height)
 	/* Direct video acquisition leaves the draw buffer clean for the GPU:
 	 * non-preserve frames have no CPU writes, and preserve copies are flushed
 	 * immediately after the memcpy/memset. */
-	if(gpu_video_clean_first_begin)
-	{
-		gpu_video_clean_first_begin = false;
-	}
-	else
+	const bool clean_video_begin =
+		gpu_video_clean_first_begin && framebuffer == gpu_video_draw_fb;
+	gpu_video_clean_first_begin = false;
+	if(!clean_video_begin)
 	{
 		of_cache_flush_range(framebuffer, bytes);
 	}
@@ -1098,7 +1290,7 @@ bool OF_WolfGPU_DrawColumn(uint8_t *dest, int count, const uint8_t *source,
 	int source_len, int texfrac, int texstep, int light)
 {
 	if(!gpu_is_power_of_two(source_len) || source_len > 256)
-		return false;
+		return gpu_reject();
 
 	return gpu_add_affine(dest, count, source, source_len,
 		1, 0, source_len - 1,
@@ -1112,9 +1304,9 @@ bool OF_WolfGPU_DrawMaskedColumn(uint8_t *dest, int count,
 	if(!gpu_available || !gpu_frame_active)
 		return false;
 	if(dest == NULL || source == NULL || count <= 0)
-		return false;
+		return gpu_reject();
 	if(!gpu_is_power_of_two(source_len) || source_len > 256)
-		return false;
+		return gpu_reject();
 
 	const int texmask = source_len - 1;
 	const uint8_t maskState = gpu_classify_mask_source(source, source_len);
@@ -1175,7 +1367,7 @@ bool OF_WolfGPU_DrawRawColumn(uint8_t *dest, int count,
 	const uint8_t *source, int source_len, int texfrac, int texstep)
 {
 	if(!gpu_is_power_of_two(source_len) || source_len > 1024)
-		return false;
+		return gpu_reject();
 
 	return gpu_add_affine(dest, count, source, source_len,
 		1, 0, source_len - 1,
@@ -1189,12 +1381,33 @@ void OF_WolfGPU_PreloadSource(const uint8_t *source, uint32_t bytes)
 	gpu_make_source_visible(source, bytes);
 }
 
+/* Texture pixel buffers were freed or recomposited (level precache unload,
+ * palette invalidation, lazy first composition after a free).  Heap reuse can
+ * place NEW texel data at an address range the source-visibility cache still
+ * considers flushed -- the composited pixels then sit dirty in the CPU cache
+ * while the GPU samples stale SDRAM bytes (seen as black spans on a freshly
+ * switched-to weapon sprite).  Forget all cached source state so the next use
+ * re-flushes, and schedule a GPU texture-cache flush for the next frame
+ * start. */
+void OF_WolfGPU_SourceBuffersChanged(void)
+{
+	if(!gpu_available)
+		return;
+
+	gpu_reset_source_cache();
+	memset(gpu_mask_cache, 0, sizeof(gpu_mask_cache));
+	gpu_mask_cache_last.source = NULL;
+	gpu_mask_cache_last.source_len = 0;
+	gpu_mask_cache_last.state = 0;
+	gpu_tex_flush_pending = true;
+}
+
 bool OF_WolfGPU_DrawSpan(uint8_t *dest, int count, const uint8_t *source,
 	int tex_width, int tex_height, int sfrac, int tfrac,
 	int sstep, int tstep, int light)
 {
 	if(!gpu_is_power_of_two(tex_width) || !gpu_is_power_of_two(tex_height))
-		return false;
+		return gpu_reject();
 
 	return gpu_add_affine(dest, count, source, tex_width * tex_height,
 		tex_width, tex_width - 1, tex_height - 1,
@@ -1206,9 +1419,9 @@ bool OF_WolfGPU_ClearSpan(uint8_t *dest, int count, uint8_t color)
 	if(!gpu_available || !gpu_frame_active)
 		return false;
 	if(dest == NULL || count <= 0 || count > 65535)
-		return false;
+		return gpu_reject();
 	if(!gpu_rect_within_active_frame(dest, count, 1, gpu_pitch))
-		return false;
+		return gpu_reject();
 
 	gpu_prepare_for_gpu_write();
 	gpu_flush_batch();
@@ -1225,10 +1438,10 @@ bool OF_WolfGPU_ClearRect(uint8_t *dest, int width, int height, uint8_t color)
 	if(dest == NULL || width <= 0 || height <= 0 ||
 		width > 65535 || height > 65535)
 	{
-		return false;
+		return gpu_reject();
 	}
 	if(!gpu_rect_within_active_frame(dest, width, height, gpu_pitch))
-		return false;
+		return gpu_reject();
 
 	gpu_prepare_for_gpu_write();
 	gpu_flush_batch();

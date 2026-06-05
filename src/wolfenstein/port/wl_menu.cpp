@@ -45,6 +45,8 @@ int BORDCOLOR, BORD2COLOR, BORD3COLOR, BKGDCOLOR, STRIPE, STRIPEBG,
 	MENUWIN_BACKGROUND, MENUWIN_TOPBORDER, MENUWIN_BOTBORDER,
 	MENUWINHGLT_BACKGROUND, MENUWINHGLT_TOPBORDER, MENUWINHGLT_BOTBORDER;
 static MenuItem	*readThis;
+static MenuItem	*scoreEndGameItem;
+static MenuItem	*backToGameItem;
 // Android version reads this elsewhere so non-static.
 bool menusAreFaded = true;
 
@@ -63,7 +65,7 @@ Menu mouseSensitivity(20, 50, 300, 24);
 Menu joySensitivity(20, 30, 300, 24);
 Menu playerClasses(NM_X, NM_Y, NM_W, 24);
 Menu episodes(NE_X+4, NE_Y-1, NE_W+7, 83);
-Menu skills(NM_X, NM_Y, NM_W, 24);
+Menu skills(SKILL_X, NM_Y, NM_W, 24);
 Menu controls(15, 70, 310, 24);
 Menu resolutionMenu(90, 25, 150, 24);
 
@@ -400,9 +402,10 @@ void CreateMenus()
 	readThis->setVisible(gameinfo.DrawReadThis);
 	readThis->setHighlighted(true);
 	mainMenu.addItem(readThis);
-	mainMenu.addItem(new MenuItem(language["STR_VS"], ViewScoresOrEndGame));
-	mainMenu.addItem(new MenuItem(language["STR_BD"], PlayDemosOrReturnToGame));
-	mainMenu.addItem(new MenuItem(language["STR_QT"], QuitGame));
+	scoreEndGameItem = new MenuItem(language["STR_VS"], ViewScoresOrEndGame);
+	mainMenu.addItem(scoreEndGameItem);
+	backToGameItem = new MenuItem(language["STR_BD"], PlayDemosOrReturnToGame);
+	mainMenu.addItem(backToGameItem);
 
 	playerClasses.setHeadText(language["STR_PLAYERCLASS"]);
 	for(unsigned int i = 0;i < gameinfo.PlayerClasses.Size();++i)
@@ -430,13 +433,12 @@ void CreateMenus()
 	}
 
 	skills.setHeadText(language["STR_HOWTOUGH"]);
-	skills.setHeadPicture("M_HOWTGH", true);
 	for(unsigned int i = 0;i < SkillInfo::GetNumSkills();++i)
 	{
 		SkillInfo &skill = SkillInfo::GetSkill(i);
 		MenuItem *tmp = new MenuItem(skill.Name, StartNewGame);
 		if(!skill.SkillPicture.IsEmpty())
-			tmp->setPicture(skill.SkillPicture, NM_X + 185, NM_Y + 7);
+			tmp->setPicture(skill.SkillPicture, skills.getX() + 185, skills.getY() + 7);
 		skills.addItem(tmp);
 	}
 	skills.setCurrentPosition(2);
@@ -498,7 +500,6 @@ void CreateMenus()
 	controlBase.addItem(new BooleanMenuItem(language["STR_JOYEN"], joystickenabled, EnterControlBase));
 	controlBase.addItem(new MenuSwitcherMenuItem(language["STR_JOYSENS"], joySensitivity));
 	controlBase.addItem(new MenuSwitcherMenuItem(language["STR_CUSTOM"], controls));
-	controlBase.addItem(new BooleanMenuItem(language["STR_ESCQUIT"], quitonescape));
 
 	joySensitivity.setHeadText(language["STR_JOYSENS"]);
 	for(int i = 0;i < JoyNumAxes;++i)
@@ -649,7 +650,9 @@ void US_ControlPanel (ScanCode scancode)
 			goto finishup;
 
 		finishup:
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 			CleanupControlPanel ();
+#endif
 			return;
 
 		default:
@@ -659,30 +662,30 @@ void US_ControlPanel (ScanCode scancode)
 	if(ingame)
 	{
 		mainMenu[0]->setEnabled(Net::InitVars.mode == Net::MODE_SinglePlayer); // Require explicit end game for net games
-		mainMenu[mainMenu.countItems()-3]->setText(language["STR_EG"]);
-		mainMenu[mainMenu.countItems()-3]->setEnabled(Net::IsArbiter());
-		mainMenu[mainMenu.countItems()-2]->setText(language["STR_BG"]);
-		mainMenu[mainMenu.countItems()-2]->setEnabled(true);
-		mainMenu[mainMenu.countItems()-2]->setHighlighted(true);
-		mainMenu[3]->setEnabled(Net::InitVars.mode == Net::MODE_SinglePlayer && players[ConsolePlayer].state != player_t::PST_DEAD);
+		scoreEndGameItem->setText(language["STR_EG"]);
+		scoreEndGameItem->setEnabled(Net::IsArbiter());
+		backToGameItem->setText(language["STR_BG"]);
+		backToGameItem->setEnabled(true);
+		backToGameItem->setHighlighted(true);
+		GameSave::GetSaveMenuItem()->setEnabled(Net::InitVars.mode == Net::MODE_SinglePlayer && players[ConsolePlayer].state != player_t::PST_DEAD);
 	}
 	else
 	{
 		mainMenu[0]->setEnabled(true);
 		if (gameinfo.TrackHighScores == true && Net::InitVars.mode == Net::MODE_SinglePlayer)
 		{
-			mainMenu[mainMenu.countItems()-3]->setText(language["STR_VS"]);
-			mainMenu[mainMenu.countItems()-3]->setEnabled(true);
+			scoreEndGameItem->setText(language["STR_VS"]);
+			scoreEndGameItem->setEnabled(true);
 		}
 		else
 		{
-			mainMenu[mainMenu.countItems()-3]->setText(language["STR_EG"]);
-			mainMenu[mainMenu.countItems()-3]->setEnabled(false);
+			scoreEndGameItem->setText(language["STR_EG"]);
+			scoreEndGameItem->setEnabled(false);
 		}
-		mainMenu[mainMenu.countItems()-2]->setText(language["STR_BD"]);
-		mainMenu[mainMenu.countItems()-2]->setEnabled(Net::InitVars.mode == Net::MODE_SinglePlayer);
-		mainMenu[mainMenu.countItems()-2]->setHighlighted(false);
-		mainMenu[3]->setEnabled(false);
+		backToGameItem->setText(language["STR_BD"]);
+		backToGameItem->setEnabled(Net::InitVars.mode == Net::MODE_SinglePlayer);
+		backToGameItem->setHighlighted(false);
+		GameSave::GetSaveMenuItem()->setEnabled(false);
 	}
 	mainMenu.validateCurPos();
 	mainMenu.draw();
@@ -732,10 +735,7 @@ void US_ControlPanel (ScanCode scancode)
 		switch (which)
 		{
 			case -1:
-				if(!ingame || quitonescape)
-					QuitGame(0);
-				else
-					PlayDemosOrReturnToGame(0);
+				PlayDemosOrReturnToGame(0);
 				break;
 			default:
 				break;
@@ -750,7 +750,9 @@ void US_ControlPanel (ScanCode scancode)
 	//
 	// DEALLOCATE EVERYTHING
 	//
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 	CleanupControlPanel ();
+#endif
 
 	// RETURN/START GAME EXECUTION
 }
@@ -802,17 +804,7 @@ int CP_CheckQuick (ScanCode scancode)
 			GameSave::QuickLoadOrSave(true);
 			return 1;
 
-		//
-		// QUIT
-		//
 		case sc_F10:
-			WindowX = WindowY = 0;
-			WindowW = 320;
-			WindowH = 160;
-			QuitGame(-1);
-
-			DrawPlayScreen ();
-			WindowH = 200;
 			return 1;
 	}
 
@@ -1227,9 +1219,11 @@ void MenuFadeOut()
 	assert(!menusAreFaded);
 	menusAreFaded = true;
 
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 	VL_FadeOut(0, 255,
 		RPART(gameinfo.MenuFadeColor), GPART(gameinfo.MenuFadeColor), BPART(gameinfo.MenuFadeColor),
 		10);
+#endif
 }
 
 void MenuFadeIn()
@@ -1253,9 +1247,17 @@ void ShowMenu(Menu &menu)
 	Menu::closeMenus(false);
 	menu.show();
 
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 	CleanupControlPanel();
+#endif
 	IN_ClearKeysDown ();
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 	VW_FadeOut();
+#endif
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	if(viewsize != 21)
+		VH_AcquireDeferredScreenLock();
+#endif
 	if(viewsize != 21)
 		DrawPlayScreen ();
 

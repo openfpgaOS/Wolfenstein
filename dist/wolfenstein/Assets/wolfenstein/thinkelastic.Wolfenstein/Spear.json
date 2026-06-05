@@ -1,32 +1,107 @@
 {
     "instance": {
         "magic": "APF_VER_1",
-        "variant_select": { "id": 666, "select": false },
+        "variant_select": {
+            "id": 666,
+            "select": false
+        },
         "data_slots": [
-            { "id": 1, "filename": "os.bin" },
-            { "id": 2, "filename": "spear.ini" },
-            { "id": 3, "filename": "wolfenstein.elf" },
-            { "id": 4, "filename": "wolfmidi.zip" },
-            { "id": 5, "filename": "AUDIOHED.SOD" },
-            { "id": 6, "filename": "AUDIOT.SOD" },
-            { "id": 7, "filename": "bank.ofsf" },
-            { "id": 8, "filename": "ecwolf.cfg" },
-            { "id": 9, "filename": "GAMEMAPS.SOD" },
-            { "id": 10, "filename": "savegam0.ecs" },
-            { "id": 11, "filename": "savegam1.ecs" },
-            { "id": 12, "filename": "savegam2.ecs" },
-            { "id": 13, "filename": "savegam3.ecs" },
-            { "id": 14, "filename": "savegam4.ecs" },
-            { "id": 15, "filename": "savegam5.ecs" },
-            { "id": 16, "filename": "savegam6.ecs" },
-            { "id": 17, "filename": "savegam7.ecs" },
-            { "id": 18, "filename": "savegam8.ecs" },
-            { "id": 19, "filename": "savegam9.ecs" },
-            { "id": 20, "filename": "MAPHEAD.SOD" },
-            { "id": 21, "filename": "VGADICT.SOD" },
-            { "id": 22, "filename": "VGAGRAPH.SOD" },
-            { "id": 23, "filename": "VGAHEAD.SOD" },
-            { "id": 24, "filename": "VSWAP.SOD" }
+            {
+                "id": 1,
+                "filename": "os.bin"
+            },
+            {
+                "id": 2,
+                "filename": "spear.ini"
+            },
+            {
+                "id": 3,
+                "filename": "wolfenstein.elf"
+            },
+            {
+                "id": 4,
+                "filename": "wolfmidi.zip"
+            },
+            {
+                "id": 5,
+                "filename": "AUDIOHED.SOD"
+            },
+            {
+                "id": 6,
+                "filename": "AUDIOT.SOD"
+            },
+            {
+                "id": 7,
+                "filename": "bank.ofsf"
+            },
+            {
+                "id": 8,
+                "filename": "ecwolf.cfg"
+            },
+            {
+                "id": 10,
+                "filename": "Spear_0.sav"
+            },
+            {
+                "id": 11,
+                "filename": "Spear_1.sav"
+            },
+            {
+                "id": 12,
+                "filename": "Spear_2.sav"
+            },
+            {
+                "id": 13,
+                "filename": "Spear_3.sav"
+            },
+            {
+                "id": 14,
+                "filename": "Spear_4.sav"
+            },
+            {
+                "id": 15,
+                "filename": "Spear_5.sav"
+            },
+            {
+                "id": 16,
+                "filename": "Spear_6.sav"
+            },
+            {
+                "id": 17,
+                "filename": "Spear_7.sav"
+            },
+            {
+                "id": 18,
+                "filename": "Spear_8.sav"
+            },
+            {
+                "id": 19,
+                "filename": "Spear_9.sav"
+            },
+            {
+                "id": 20,
+                "filename": "MAPHEAD.SOD"
+            },
+            {
+                "id": 21,
+                "filename": "VGADICT.SOD"
+            },
+            {
+                "id": 22,
+                "filename": "VGAGRAPH.SOD"
+            },
+            {
+                "id": 23,
+                "filename": "VGAHEAD.SOD"
+            },
+            {
+                "id": 24,
+                "filename": "VSWAP.SOD"
+            },
+            {
+                "id": 25,
+                "filename": "GAMEMAPS.SOD"
+            }
         ]
     }
 }
