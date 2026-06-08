@@ -13,6 +13,7 @@
 #include "wl_agent.h"
 #include "wl_game.h"
 #include "wl_inter.h"
+#include "of_ecwolf_gpu.h"
 #include "wl_net.h"
 #include "wl_text.h"
 #include "g_mapinfo.h"
@@ -772,6 +773,32 @@ bool PreloadUpdate (unsigned current, unsigned total)
 	return (false);
 }
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+// Smooth "Get Psyched" bar: the load phases report fine-grained completion
+// into a 0..1000 bar range (setup 0-50, textures 50-500, sounds 500-1000),
+// but the bar only redraws when it visibly advances -- every PreloadUpdate
+// is a full-screen present, which is not free on this hardware.
+static unsigned int preloadBarPos;
+
+static void PreloadProgressSpan(unsigned base, unsigned span,
+                                unsigned cur, unsigned total)
+{
+	if(total == 0)
+		return;
+	const unsigned pos = base + (unsigned)((uint64_t)span * cur / total);
+	if(pos > preloadBarPos && (pos - preloadBarPos >= 16 || pos >= 1000))
+	{
+		preloadBarPos = pos;
+		PreloadUpdate(pos, 1000);
+	}
+}
+
+static void PreloadTexProgress(unsigned done, unsigned total)
+{
+	PreloadProgressSpan(50, 450, done, total);
+}
+#endif
+
 void PreloadGraphics (bool showPsych)
 {
 	if(showPsych)
@@ -795,18 +822,35 @@ void PreloadGraphics (bool showPsych)
 		VW_UpdateScreen ();
 		VW_FadeIn ();
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		preloadBarPos = 50;
+		PreloadUpdate (50, 1000);
+	}
+
+	TexMan.PrecacheLevel(showPsych ? PreloadTexProgress : NULL);
+
+	// Decode every digitized sound now, behind the load screen.  They used
+	// to load lazily on first play, which ran SD_PrepareSound/Mix_LoadWAV
+	// inside the frame loop and dropped a frame.  Pump one sound at a time
+	// so the progress bar tracks the real work.
+	SoundInfo.QueueAllDigitalLoads();
+	{
+		const unsigned int totalSounds = SoundInfo.DigitalLoadsPending();
+		unsigned int doneSounds = 0;
+		while(SoundInfo.DigitalLoadsPending() > 0)
+		{
+			SoundInfo.PumpDigitalLoads(1);
+			++doneSounds;
+			if(showPsych)
+				PreloadProgressSpan(500, 500, doneSounds, totalSounds);
+		}
+	}
+	SD_AdLibCacheRelease();
+#else
 		PreloadUpdate (5, 10);
 	}
 
 	TexMan.PrecacheLevel();
-
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	// Decode every digitized sound now, behind the load screen.  They used
-	// to load lazily on first play, which ran SD_PrepareSound/Mix_LoadWAV
-	// inside the frame loop and dropped a frame -- a visible hitch the
-	// first time each sound played.
-	SoundInfo.QueueAllDigitalLoads();
-	SoundInfo.PumpDigitalLoads(0x7FFFFFFF);
 #endif
 
 	if(showPsych)

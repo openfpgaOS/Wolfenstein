@@ -101,6 +101,10 @@
             {
                 "id": 25,
                 "filename": "GAMEMAPS.WL6"
+            },
+            {
+                "id": 26,
+                "filename": "sfxcache.ofx"
             }
         ]
     }

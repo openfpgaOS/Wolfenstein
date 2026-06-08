@@ -101,6 +101,10 @@
             {
                 "id": 25,
                 "filename": "SOD-M2/GAMEMAPS.SOD"
+            },
+            {
+                "id": 26,
+                "filename": "sfxcache.ofx"
             }
         ]
     }

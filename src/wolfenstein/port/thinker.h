@@ -103,6 +103,11 @@ class Thinker : public DObject, public EmbeddedList<Thinker>::Node
 		virtual void	PostBeginPlay() {}
 		size_t			PropagateMark();
 
+		// Transient (not serialized): set when an actor settles onto an
+		// infinite-duration frame with no per-tic thinker, so the tick loop
+		// can skip it -- the original Wolf3D didn't tick static objects.
+		bool			ofThinkDormant;
+
 	private:
 		friend class ThinkerList;
 

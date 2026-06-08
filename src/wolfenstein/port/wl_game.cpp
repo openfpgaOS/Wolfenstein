@@ -314,6 +314,7 @@ void SetupGameLevel (void)
 //
 // load the level
 //
+	InvalidateSimTileCaches ();
 	CA_CacheMap (gamestate.mapname, loadedgame);
 	if (!loadedgame)
 		StartMusic ();

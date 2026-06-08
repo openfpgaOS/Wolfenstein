@@ -10,6 +10,7 @@
 #include "wl_menu.h"
 #include "id_ca.h"
 #include "id_sd.h"
+#include "sndinfo.h"
 #include "id_vl.h"
 #include "id_vh.h"
 #include "id_us.h"
@@ -815,6 +816,18 @@ static void InitGame()
 // initialize the menusalcProjection
 	printf("CreateMenus: Preparing the menu system...\n");
 	CreateMenus();
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+//
+// Preload every digital sound behind the startup screen: streams the whole
+// SFX cache from SD here, where a progress message is already on screen, so
+// the menus and the first "Get Psyched" find everything resident.
+//
+	DrawStartupConsole("Loading sounds");
+	SoundInfo.QueueAllDigitalLoads();
+	SoundInfo.PumpDigitalLoads(0x7FFFFFFF);
+	SD_AdLibCacheRelease();
+#endif
 
 //
 // Finish signon screen

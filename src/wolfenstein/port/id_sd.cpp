@@ -29,16 +29,15 @@
 #include "wl_def.h"
 #include <SDL_mixer.h>
 #include "w_wad.h"
+#include "m_swap.h"
 #include "resourcefiles/resourcefile.h"
 #include "zstring.h"
 #include "sndinfo.h"
 #include "sndseq.h"
-#ifndef OF_ECWOLF_OPENFPGA
 #ifdef USE_GPL
 #include "dosbox/dbopl.h"
-#else
+#elif !defined(OF_ECWOLF_OPENFPGA)
 #include "mame/fmopl.h"
-#endif
 #endif
 #include "wl_main.h"
 #include "wl_net.h"
@@ -249,6 +248,319 @@ static double Mix_GetMusicPosition(Mix_Music*) { return 0.0; }
 #endif
 
 #ifdef OF_ECWOLF_OPENFPGA
+
+///////////////////////////////////////////////////////////////////////////
+//
+//  AdLib sound effects, pre-rendered to PCM.
+//
+//  The OPL/PC-speaker software mixer does not run on this platform (music
+//  is hardware MIDI, digitized sounds play through the hardware PCM mixer),
+//  which left AdLib-only effects -- most item pickups, menu blips and many
+//  world sounds -- completely silent.  AdLib effects are deterministic
+//  140 Hz register scripts, so each one is synthesized ONCE through the
+//  DBOPL emulator when the sound is prepared (behind the level-load screen,
+//  with the digitized precache) and then played as an ordinary digitized
+//  chunk on a hardware voice.  No emulation runs during gameplay.
+//
+///////////////////////////////////////////////////////////////////////////
+
+static FResourceFile *SD_OpenMusicPack();
+
+// Optional pre-rendered cache: scripts/sfxcache.sh renders every AdLib
+// script at the OPL2's native 49716 Hz on the host, sinc-band-limits it to
+// 48 kHz, and writes the standalone "sfxcache.ofx" pack (its own data slot,
+// id 26), keyed by FNV-1a hash of the script bytes.  A miss (no pack,
+// modded or changed sound) falls back to the on-device DBOPL render below,
+// so the cache can never be stale or required.
+//
+// The multi-game pack runs well past 10 MB -- far beyond what a single
+// allocation may claim here -- so only the small hash index is resident and
+// each hit streams its PCM straight from the file into the chunk buffer.
+static bool     sfxCacheProbed;
+static FILE    *sfxCacheFile;
+unsigned int    sfxCacheHits, sfxCacheMisses;
+static byte    *sfxCacheIndex;     // count * 16-byte entries
+static uint32_t sfxCacheCount;
+static uint32_t sfxCacheRate;
+
+static uint64_t SD_AdLibHash(const byte *data, uint32_t n)
+{
+	uint64_t h = 14695981039346656037ull;
+	for(uint32_t i = 0; i < n; ++i)
+	{
+		h ^= data[i];
+		h *= 1099511628211ull;
+	}
+	return h;
+}
+
+static void SD_AdLibCacheProbe()
+{
+	if(sfxCacheProbed)
+		return;
+	sfxCacheProbed = true;
+
+	FILE *f = fopen("sfxcache.ofx", "rb");
+	if(f == NULL)
+		return;
+
+	byte header[16];
+	if(fread(header, 1, 16, f) != 16 || memcmp(header, "OFX1", 4) != 0)
+	{
+		fclose(f);
+		return;
+	}
+	const uint32_t count = ReadLittleLong(header + 4);
+	const uint32_t rate = ReadLittleLong(header + 8);
+	if(count == 0 || count > 100000 || rate == 0)
+	{
+		fclose(f);
+		return;
+	}
+
+	byte *index = (byte *)malloc(count * 16);
+	if(index == NULL)
+	{
+		fclose(f);
+		return;
+	}
+	if(fread(index, 1, count * 16, f) != count * 16)
+	{
+		free(index);
+		fclose(f);
+		return;
+	}
+
+	sfxCacheFile = f;
+	sfxCacheIndex = index;
+	sfxCacheCount = count;
+	sfxCacheRate = rate;
+	printf("OpenFPGA: AdLib SFX cache indexed (%u sounds).\n", (unsigned)count);
+}
+
+// Called after the level precache pump; keeps the (tiny) index resident but
+// allows a re-probe so lazily loaded mod sounds can still hit the cache.
+void SD_AdLibCacheRelease()
+{
+	if(sfxCacheFile != NULL)
+	{
+		fclose(sfxCacheFile);
+		sfxCacheFile = NULL;
+	}
+	if(sfxCacheIndex != NULL)
+	{
+		free(sfxCacheIndex);
+		sfxCacheIndex = NULL;
+	}
+	sfxCacheCount = 0;
+	sfxCacheProbed = false;
+}
+
+// On a hash hit, stream the entry's PCM from the pack into a fresh WAV
+// buffer and return it as a chunk; NULL = miss or short read.
+static void SD_WriteWavHeader(byte *wav, uint32_t samples, uint32_t rate);
+
+static Mix_Chunk *SD_AdLibCacheFetch(uint64_t hash)
+{
+	if(sfxCacheIndex == NULL || sfxCacheFile == NULL)
+		return NULL;
+
+	for(uint32_t i = 0; i < sfxCacheCount; i++)
+	{
+		const byte *e = sfxCacheIndex + i * 16;
+		const uint64_t ehash = (uint64_t)ReadLittleLong(e) |
+			((uint64_t)ReadLittleLong(e + 4) << 32);
+		if(ehash != hash)
+			continue;
+
+		const uint32_t offset = ReadLittleLong(e + 8);
+		const uint32_t samples = ReadLittleLong(e + 12);
+		if(samples == 0)
+			return NULL;
+
+		byte *wav = (byte *)malloc(44 + samples * 2);
+		if(wav == NULL)
+			return NULL;
+
+		if(fseek(sfxCacheFile, (long)offset, SEEK_SET) != 0 ||
+			fread(wav + 44, 1, samples * 2, sfxCacheFile) != samples * 2)
+		{
+			free(wav);
+			return NULL;
+		}
+
+		SD_WriteWavHeader(wav, samples, sfxCacheRate);
+		Mix_Chunk *chunk = Mix_LoadWAV_RW(
+			SDL_RWFromMem(wav, 44 + samples * 2), 1);
+		free(wav);
+		if(chunk != NULL)
+			sfxCacheHits++;
+		return chunk;
+	}
+	sfxCacheMisses++;
+	return NULL;
+}
+
+// Minimal PCM WAV header (mono, 16-bit).
+static void SD_WriteWavHeader(byte *wav, uint32_t samples, uint32_t rate)
+{
+	const uint32_t dataBytes = samples * 2;
+	memcpy(wav, "RIFF", 4);
+	*(uint32_t *)(wav + 4)  = LittleLong(36 + dataBytes);
+	memcpy(wav + 8, "WAVEfmt ", 8);
+	*(uint32_t *)(wav + 16) = LittleLong(16);
+	*(uint16_t *)(wav + 20) = LittleShort(1);   // PCM
+	*(uint16_t *)(wav + 22) = LittleShort(1);   // mono
+	*(uint32_t *)(wav + 24) = LittleLong(rate);
+	*(uint32_t *)(wav + 28) = LittleLong(rate * 2);
+	*(uint16_t *)(wav + 32) = LittleShort(2);   // block align
+	*(uint16_t *)(wav + 34) = LittleShort(16);  // bits
+	memcpy(wav + 36, "data", 4);
+	*(uint32_t *)(wav + 40) = LittleLong(dataBytes);
+}
+
+static const unsigned int ADLIB_TICK_RATE     = 140;    // original service rate
+// Render at the mixer's native rate: DBOPL steps its oscillators at the
+// output rate, so a low render rate folds the FM harmonics above Nyquist
+// back down as aliasing (audibly duller/buzzier than the real chip), and
+// the voice resampler then smears the top end again.  At 48 kHz the
+// harmonics live in the same band as on real hardware and playback is 1:1.
+static const unsigned int ADLIB_RENDER_RATE   = 48000;
+static const unsigned int ADLIB_TICK_SAMPLES  = (ADLIB_RENDER_RATE + ADLIB_TICK_RATE - 1) / ADLIB_TICK_RATE; // max per tick (343)
+static const unsigned int ADLIB_RELEASE_TICKS = 35;     // 1/4 s key-off tail
+
+Mix_Chunk* SD_PrepareAdLibSound(int which)
+{
+	// The lump is the original packed AUDIOT layout; parse it field by field
+	// (struct casts depend on compiler padding):
+	//   [0]  u32  length  -- data bytes, one per 140 Hz tick
+	//   [4]  u16  priority
+	//   [6]  byte inst[16]
+	//   [22] byte block
+	//   [23] byte data[length]
+	const int size = Wads.LumpLength(which);
+	if(size <= ORIG_ADLIBSOUND_SIZE - 1)
+		return NULL;
+
+	FMemLump soundLump = Wads.ReadLump(which);
+	const byte *raw = (const byte *)soundLump.GetMem();
+
+	uint32_t length = ReadLittleLong(raw);
+	const uint32_t maxData = (uint32_t)size - (ORIG_ADLIBSOUND_SIZE - 1);
+	if(length == 0 || length > maxData)
+		length = maxData;
+
+	Instrument inst;
+	memset(&inst, 0, sizeof(inst));
+	memcpy(&inst, raw + 6, 16);
+	if(!(inst.mSus | inst.cSus))
+		return NULL;
+
+	const byte block = ((raw[22] & 7) << 2) | 0x20;
+	const byte *data = raw + 23;
+
+	// Pre-rendered cache hit?  (Host-rendered at native OPL rate, streamed
+	// straight from the standalone pack file.)
+	SD_AdLibCacheProbe();
+	{
+		Mix_Chunk *cached = SD_AdLibCacheFetch(SD_AdLibHash(raw, 23 + length));
+		if(cached != NULL)
+			return cached;
+	}
+
+	// Chip::Setup() brute-force calibrates the envelope rate tables (62
+	// rates x 16 guess passes x up to ~1M simulated samples) -- seconds of
+	// work on this CPU.  Build the chip ONCE; between sounds only registers
+	// are rewritten, exactly like the real card in-game.  The previous
+	// sound's key-off release tail leaves the operators silent.
+	static DBOPL::Chip *chip;
+	if(chip == NULL)
+	{
+		chip = new DBOPL::Chip();
+		chip->Setup(ADLIB_RENDER_RATE);
+	}
+
+	chip->SetVolume(MAX_VOLUME);
+	for(Bit32u r = 0x20; r <= 0xF5; r++)
+		chip->WriteReg(r, 0);
+	chip->WriteReg(1, 0x20);  // Set WSE=1
+
+	// Program channel 0 -- mirrors SDL_AlSetChanInst(inst, 0).
+	{
+		const byte m = 0, c = 3;
+		chip->WriteReg(m + alChar,   inst.mChar);
+		chip->WriteReg(m + alScale,  inst.mScale);
+		chip->WriteReg(m + alAttack, inst.mAttack);
+		chip->WriteReg(m + alSus,    inst.mSus);
+		chip->WriteReg(m + alWave,   inst.mWave);
+		chip->WriteReg(c + alChar,   inst.cChar);
+		chip->WriteReg(c + alScale,  inst.cScale);
+		chip->WriteReg(c + alAttack, inst.cAttack);
+		chip->WriteReg(c + alSus,    inst.cSus);
+		chip->WriteReg(c + alWave,   inst.cWave);
+		chip->WriteReg(0 + alFreqL,   0);
+		chip->WriteReg(0 + alFreqH,   0);
+		chip->WriteReg(0 + alFeedCon, 0);
+	}
+
+	const uint32_t totalTicks   = length + ADLIB_RELEASE_TICKS;
+	const uint32_t maxSamples   = totalTicks * ADLIB_TICK_SAMPLES;
+	const uint32_t wavLen       = 44 + maxSamples * 2;
+
+	byte *wav = (byte *)malloc(wavLen);
+	if(wav == NULL)
+		return NULL;
+	int16_t *pcm = (int16_t *)(wav + 44);
+
+	// Run the 140 Hz service exactly like SDL_IMFMusicPlayer's AL block,
+	// then hold the key off so the envelope release decays into the tail.
+	// 140 does not divide the render rate evenly, so a fractional-sample
+	// accumulator keeps the tick timing exact (342/343-sample ticks).
+	Bit32s block32[ADLIB_TICK_SAMPLES];
+	uint32_t samples = 0;
+	uint32_t sampleAcc = 0;
+	for(uint32_t tick = 0; tick < totalTicks; ++tick)
+	{
+		if(tick < length)
+		{
+			if(data[tick])
+			{
+				chip->WriteReg(alFreqL, data[tick]);
+				chip->WriteReg(alFreqH, block);
+			}
+			else
+				chip->WriteReg(alFreqH, 0);
+		}
+		else if(tick == length)
+			chip->WriteReg(alFreqH, 0);
+
+		sampleAcc += ADLIB_RENDER_RATE;
+		const uint32_t tickSamples = sampleAcc / ADLIB_TICK_RATE;
+		sampleAcc -= tickSamples * ADLIB_TICK_RATE;
+
+		chip->GenerateBlock2(tickSamples, block32);
+		for(unsigned int i = 0; i < tickSamples; ++i)
+		{
+			// Multiply by 4 to match the loudness of the music path.
+			Bit32s sample = block32[i] << 2;
+			if(sample > 32767) sample = 32767;
+			else if(sample < -32768) sample = -32768;
+			pcm[samples + i] = (int16_t)LittleShort((int16_t)sample);
+		}
+		samples += tickSamples;
+	}
+
+	// Trim the silent part of the release tail (keep the scripted length).
+	const uint32_t minSamples = (uint32_t)((uint64_t)length * ADLIB_RENDER_RATE / ADLIB_TICK_RATE);
+	while(samples > minSamples && abs((int)(int16_t)LittleShort(pcm[samples - 1])) < 16)
+		--samples;
+
+	SD_WriteWavHeader(wav, samples, ADLIB_RENDER_RATE);
+
+	Mix_Chunk *chunk = Mix_LoadWAV_RW(SDL_RWFromMem(wav, 44 + samples * 2), 1);
+	free(wav);
+	return chunk;
+}
 
 static Mix_Music *SD_LoadMIDIMemory(const byte *data, int length)
 {
@@ -1482,7 +1794,15 @@ int SD_PlaySound(const char* sound, SoundChannel chan)
 	if ((SoundMode != sdm_Off) && sdata.IsNull())
 		return 0;
 
-	if ((DigiMode != sds_Off) && sdata.HasType(SoundData::DIGITAL))
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// AdLib-only effects (most pickups, menu blips) are pre-rendered to PCM
+	// chunks on this platform, so they flow through the digitized path too.
+	const bool digitalCapable = sdata.HasType(SoundData::DIGITAL) ||
+		sdata.HasType(SoundData::ADLIB);
+#else
+	const bool digitalCapable = sdata.HasType(SoundData::DIGITAL);
+#endif
+	if ((DigiMode != sds_Off) && digitalCapable)
 	{
 		if(sdata.GetDigitalData() == NULL)
 		{
@@ -1591,7 +1911,13 @@ int SD_PlaySound(const char* sound, SoundChannel chan)
 bool SD_SoundPlaying(void)
 {
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	return false;
+	// All SFX are digitized chunks on hardware voices here, so report live
+	// channel activity.  This drives the vanilla politeness gates: the
+	// wall-bump thud (ClipMove suppresses it while anything else plays --
+	// with a stub "false" it retriggered every tic, 70 Hz of noise), the
+	// intermission bonus-tally pacing, and SD_WaitSoundDone.  Music runs on
+	// the MIDI synth and is deliberately not counted.
+	return Mix_Playing(-1) > 0;
 #endif
 
 	bool result = false;

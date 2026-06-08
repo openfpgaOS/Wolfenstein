@@ -43,12 +43,16 @@ typedef enum OFWolfPerfPhase
 
 #if OF_ECWOLF_PERF_ENABLED
 uint32_t OF_WolfPerf_NowUS(void);
+void OF_WolfPerf_SetThinkerSampling(int enabled);
+int OF_WolfPerf_ThinkerSamplingEnabled(void);
 void OF_WolfPerf_FrameStart(void);
 void OF_WolfPerf_Add(OFWolfPerfPhase phase, uint32_t start_us);
 void OF_WolfPerf_AddTicks(unsigned int count);
 void OF_WolfPerf_FrameEnd(void);
 #else
 static inline uint32_t OF_WolfPerf_NowUS(void) { return 0; }
+static inline void OF_WolfPerf_SetThinkerSampling(int enabled) { (void)enabled; }
+static inline int OF_WolfPerf_ThinkerSamplingEnabled(void) { return 0; }
 static inline void OF_WolfPerf_FrameStart(void) {}
 static inline void OF_WolfPerf_Add(OFWolfPerfPhase, uint32_t) {}
 static inline void OF_WolfPerf_AddTicks(unsigned int) {}

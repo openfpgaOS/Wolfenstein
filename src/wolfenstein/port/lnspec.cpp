@@ -183,6 +183,7 @@ class EVDoor : public Thinker
 							ChangeState(Opened);
 					}
 					spot->slideAmount[direction] = spot->slideAmount[direction+2] = amount;
+					SimTileFlagsDirtySpot(spot);
 					break;
 				case Opened:
 					if(wait == 0)
@@ -212,6 +213,7 @@ class EVDoor : public Thinker
 						map->LinkZones(zone1, zone2, false);
 					}
 					spot->slideAmount[direction] = spot->slideAmount[direction+2] = amount;
+					SimTileFlagsDirtySpot(spot);
 					break;
 			}
 		}

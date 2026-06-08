@@ -130,6 +130,9 @@ extern  SDSMode         DigiMode;
 extern  SMMode          MusicMode;
 extern  bool            N3DTempoEmulation;
 static const int MAX_VOLUME = 20;
+// 0..MAX_VOLUME -> 0..1 scale factor used by the OPL emulators' per-sample
+// volume (same response curve as MIX_VOLUME_128 below).
+#define MULTIPLY_VOLUME(v) (((v) * 10.0f + 3.0f) / (MAX_VOLUME * 10.0f + 3.0f))
 static inline int MIX_VOLUME_128(const int &v)
 {
 	const int numerator = (v * 10 + 3) * 128;
@@ -174,6 +177,8 @@ extern  bool    SD_SoundPlaying(void);
 extern  void    SD_SetDigiDevice(SDSMode);
 extern  void    SD_PumpSoundLoads(void);
 extern  struct Mix_Chunk *SD_PrepareSound(int which);
+extern  struct Mix_Chunk *SD_PrepareAdLibSound(int which);
+extern  void SD_AdLibCacheRelease(void);
 extern  void    SD_StopDigitized(void);
 
 #endif

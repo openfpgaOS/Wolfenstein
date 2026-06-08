@@ -217,6 +217,12 @@ class AActor : public Thinker,
 		static EmbeddedList<AActor>::List actors;
 		typedef EmbeddedList<AActor>::Iterator Iterator;
 		static Iterator GetIterator() { return Iterator(actors); }
+
+		// Transient per-tic collision grid links (wl_agent.cpp): TryMove
+		// queries nearby tiles instead of scanning every actor.  Rebuilt
+		// each tic, never serialized.
+		AActor	*collisionNext;
+		int		collisionCell;
 	protected:
 		void	Init();
 

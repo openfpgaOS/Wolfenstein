@@ -363,6 +363,338 @@ void player_t::TakeDamage (int points, AActor *attacker)
 ===================
 */
 
+/*
+ * Per-tic actor collision grid.
+ *
+ * TryMove used to scan the global actor list for every move attempt --
+ * O(moving actors x all actors) per tic -- which halved the frame rate on
+ * actor-heavy maps (E1M2) on the 100 MHz core.  Instead, each live actor is
+ * linked once per tic into the tile under its center, and queries expand the
+ * mover's position by the largest radius seen, so the candidate set provably
+ * contains every possible overlap (overlap requires |dx| <= r_ob + r_check
+ * and r_check <= collisionGridMaxRadius).  Destroyed actors unlink
+ * immediately (AActor::Destroy), so the grid never points at freed memory.
+ */
+static TArray<AActor *> collisionGrid;
+// See SimTileFlags() in wl_agent.h.  CheckLine's sight DDA used to chase a
+// fat MapSpot per stepped tile -- the dominant per-tic cost of every awake
+// enemy on this CPU.  This dense byte map keeps the common steps (empty
+// tile, plain wall) inside one or two cache lines.
+static TArray<unsigned char> simTileFlags;
+// Actors whose radius exceeds a tile would blow the query window up for
+// everyone (the window expands by the largest radius seen, and one giant
+// outlier made every TryMove scan most of the map).  They go in this side
+// list instead and are checked linearly -- there are at most a handful.
+static TArray<AActor *> collisionGridOversized;
+static int collisionGridW = 0, collisionGridH = 0;
+static fixed collisionGridMaxRadius = 0;
+static const GameMap *collisionGridMap = NULL;
+
+void UnlinkActorCollision (AActor *ob)
+{
+	const int cell = ob->collisionCell;
+	ob->collisionCell = -1;
+	if(cell >= 0 && (unsigned int)cell < collisionGrid.Size())
+	{
+		AActor **link = &collisionGrid[cell];
+		while(*link != NULL)
+		{
+			if(*link == ob)
+			{
+				*link = ob->collisionNext;
+				ob->collisionNext = NULL;
+				return;
+			}
+			link = &(*link)->collisionNext;
+		}
+		return;
+	}
+
+	for(unsigned int i = 0;i < collisionGridOversized.Size();++i)
+	{
+		if(collisionGridOversized[i] == ob)
+		{
+			collisionGridOversized.Delete(i);
+			return;
+		}
+	}
+}
+
+void RebuildActorCollisionGrid ()
+{
+	if(map == NULL)
+	{
+		collisionGridMap = NULL;
+		collisionGridW = collisionGridH = 0;
+		return;
+	}
+
+	const int w = (int)map->GetHeader().width;
+	const int h = (int)map->GetHeader().height;
+	const unsigned int cells = (unsigned int)w * (unsigned int)h;
+	if(collisionGrid.Size() < cells)
+		collisionGrid.Resize(cells);
+	if(cells > 0)
+		memset(&collisionGrid[0], 0, collisionGrid.Size() * sizeof(AActor *));
+
+	collisionGridW = w;
+	collisionGridH = h;
+	collisionGridMap = map;
+	collisionGridMaxRadius = 0;
+	collisionGridOversized.Clear();
+
+	for(AActor::Iterator iter = AActor::GetIterator().Next();iter;iter.Next())
+	{
+		AActor * const actor = iter;
+
+		if(actor->radius > TILEGLOBAL)
+		{
+			actor->collisionCell = -1;
+			actor->collisionNext = NULL;
+			collisionGridOversized.Push(actor);
+			continue;
+		}
+
+		int tx = actor->x >> TILESHIFT;
+		int ty = actor->y >> TILESHIFT;
+		if(tx < 0) tx = 0; else if(tx >= w) tx = w - 1;
+		if(ty < 0) ty = 0; else if(ty >= h) ty = h - 1;
+
+		const int cell = ty * w + tx;
+		actor->collisionCell = cell;
+		actor->collisionNext = collisionGrid[cell];
+		collisionGrid[cell] = actor;
+
+		if(actor->radius > collisionGridMaxRadius)
+			collisionGridMaxRadius = actor->radius;
+	}
+
+	// Diagnostic: name the oversized actors once per change so outliers
+	// (misdeclared DECORATE radii) are visible on the console.
+	static unsigned int lastOversized = ~0u;
+	if(collisionGridOversized.Size() != lastOversized)
+	{
+		lastOversized = collisionGridOversized.Size();
+		for(unsigned int i = 0;i < collisionGridOversized.Size() && i < 4;++i)
+		{
+			AActor * const a = collisionGridOversized[i];
+			printf("collision: oversized actor %s radius=%d.%02d tiles\n",
+				a->GetClass()->GetName().GetChars(),
+				(int)(a->radius >> TILESHIFT),
+				(int)(((a->radius & (TILEGLOBAL - 1)) * 100) >> TILESHIFT));
+		}
+	}
+}
+
+// The exact predicate TrySpot (wl_state.cpp) historically applied to every
+// actor in the world: does `check` occupy or claim tile (x, y)?
+static inline bool ActorClaimsSpot(AActor *check, AActor *ob,
+                                   unsigned int x, unsigned int y)
+{
+	// We want to check where the actor is heading instead of the exact
+	// tile it exists in since this is essentially how Wolf3D handled things.
+	const dirtype offsetDir = check->distance >= TILEGLOBAL/2 ? check->dir : nodir;
+
+	// Players need not be checked.
+	return check != ob && !check->player && (check->flags & FL_SOLID) &&
+		static_cast<unsigned int>(check->tilex+dirdeltax[offsetDir]) == x &&
+		static_cast<unsigned int>(check->tiley+dirdeltay[offsetDir]) == y;
+}
+
+// Monster walk probes (TryWalk -> CheckSide -> TrySpot) used to scan the
+// whole actor list per probed tile -- with several probes per direction
+// attempt that was the dominant simulation cost on actor-heavy maps.  An
+// actor claiming tile (x, y) is physically within two tiles of it (tilex
+// differs from the physical tile by at most one, the claim offset by one
+// more), so the per-tic collision grid yields the complete candidate set
+// and the original predicate runs on live fields -- identical results.
+bool ActorBlocksSpot (AActor *ob, unsigned int x, unsigned int y)
+{
+	if(collisionGridMap == map && collisionGridW > 0)
+	{
+		int cxl = (int)x - 2, cyl = (int)y - 2;
+		int cxh = (int)x + 2, cyh = (int)y + 2;
+		if(cxl < 0) cxl = 0;
+		if(cyl < 0) cyl = 0;
+		if(cxh >= collisionGridW) cxh = collisionGridW - 1;
+		if(cyh >= collisionGridH) cyh = collisionGridH - 1;
+
+		for (int cy = cyl;cy <= cyh;cy++)
+		{
+			for (int cx = cxl;cx <= cxh;cx++)
+			{
+				for(AActor *check = collisionGrid[cy * collisionGridW + cx];
+					check != NULL;check = check->collisionNext)
+				{
+					if(ActorClaimsSpot(check, ob, x, y))
+						return true;
+				}
+			}
+		}
+
+		for(unsigned int i = 0;i < collisionGridOversized.Size();++i)
+		{
+			if(ActorClaimsSpot(collisionGridOversized[i], ob, x, y))
+				return true;
+		}
+
+		return false;
+	}
+
+	// No grid yet (between map setup and the first tic): full scan.
+	for(AActor::Iterator iter = AActor::GetIterator();iter.Next();)
+	{
+		if(ActorClaimsSpot(iter, ob, x, y))
+			return true;
+	}
+	return false;
+}
+
+// The solidity bytes are built ONCE per level and patched in place when a
+// tile mutates (SetTile, door/slider slideAmount writes).  A full rebuild
+// walks ~400 KB of MapSpot structs through a 32 KB D-cache -- ~12 ms -- so
+// it must never run per tic.
+static const GameMap *simTileFlagsMap = NULL;
+static int simTileFlagsW = 0, simTileFlagsH = 0;
+
+static inline unsigned char SimTileFlagClassify(MapSpot spot)
+{
+	if(!spot->tile)
+		return 0;
+	if(spot->slideAmount[0] == 0 && spot->slideAmount[1] == 0 &&
+		spot->slideAmount[2] == 0 && spot->slideAmount[3] == 0)
+		return 1;   // solid from every direction
+	return 2;       // door or sliding wall: consult the spot
+}
+
+void InvalidateSimTileCaches ()
+{
+	simTileFlagsMap = NULL;
+	collisionGridMap = NULL;
+	collisionGridW = collisionGridH = 0;
+}
+
+void SimTileFlagsDirtySpot (const void *spotPtr)
+{
+	if(simTileFlagsMap == NULL || simTileFlagsMap != map)
+		return;
+
+	MapSpot spot = (MapSpot)spotPtr;
+	const unsigned int x = spot->GetX();
+	const unsigned int y = spot->GetY();
+	if((int)x >= simTileFlagsW || (int)y >= simTileFlagsH)
+		return;
+	// Only plane 0 feeds the sight/walk logic.
+	if(map->GetSpot(x, y, 0) != spot)
+		return;
+	simTileFlags[y * simTileFlagsW + x] = SimTileFlagClassify(spot);
+}
+
+const unsigned char *SimTileFlags (int *width, int *height)
+{
+	if(map == NULL)
+		return NULL;
+
+	if(simTileFlagsMap != map)
+	{
+		const int w = (int)map->GetHeader().width;
+		const int h = (int)map->GetHeader().height;
+		if(w <= 0 || h <= 0)
+			return NULL;
+		const unsigned int cells = (unsigned int)(w * h);
+		if(simTileFlags.Size() < cells)
+			simTileFlags.Resize(cells);
+		for(int ty = 0; ty < h; ++ty)
+			for(int tx = 0; tx < w; ++tx)
+				simTileFlags[ty * w + tx] =
+					SimTileFlagClassify(map->GetSpot(tx, ty, 0));
+		simTileFlagsW = w;
+		simTileFlagsH = h;
+		simTileFlagsMap = map;
+	}
+
+	*width = simTileFlagsW;
+	*height = simTileFlagsH;
+	return &simTileFlags[0];
+}
+
+// MoveObj's "check for touching objects" sweep: every MOVING ENEMY used to
+// scan the entire actor list once per tic here -- measured at ~280 us per
+// call on the Pocket, the single largest simulation cost in the port.  Only
+// nearby actors can overlap, and the per-tic grid supplies exactly those.
+void TouchActorsNear (AActor *ob)
+{
+	if(collisionGridMap == map && collisionGridW > 0)
+	{
+		const fixed reach = ob->radius + collisionGridMaxRadius;
+		int cxl = (ob->x - reach) >> TILESHIFT;
+		int cyl = (ob->y - reach) >> TILESHIFT;
+		int cxh = (ob->x + reach) >> TILESHIFT;
+		int cyh = (ob->y + reach) >> TILESHIFT;
+		if(cxl < 0) cxl = 0;
+		if(cyl < 0) cyl = 0;
+		if(cxh >= collisionGridW) cxh = collisionGridW - 1;
+		if(cyh >= collisionGridH) cyh = collisionGridH - 1;
+
+		for (int y = cyl;y <= cyh;y++)
+		{
+			for (int x = cxl;x <= cxh;x++)
+			{
+				AActor *check = collisionGrid[y * collisionGridW + x];
+				while(check != NULL)
+				{
+					// Touch() may destroy check; it unlinks itself then.
+					AActor * const next = check->collisionNext;
+
+					if(check != ob && !(check->flags & FL_SOLID))
+					{
+						fixed r = check->radius + ob->radius;
+						if(abs(ob->x - check->x) <= r &&
+							abs(ob->y - check->y) <= r)
+							check->Touch(ob);
+					}
+
+					check = next;
+				}
+			}
+		}
+
+		for(unsigned int i = 0;i < collisionGridOversized.Size();)
+		{
+			AActor * const check = collisionGridOversized[i];
+			const unsigned int sizeBefore = collisionGridOversized.Size();
+
+			if(check != ob && !(check->flags & FL_SOLID))
+			{
+				fixed r = check->radius + ob->radius;
+				if(abs(ob->x - check->x) <= r &&
+					abs(ob->y - check->y) <= r)
+					check->Touch(ob);
+			}
+
+			if(collisionGridOversized.Size() == sizeBefore)
+				++i;
+		}
+
+		return;
+	}
+
+	// No grid yet: original full scan.
+	for(AActor::Iterator iter = AActor::GetIterator().Next();iter;)
+	{
+		AActor *check = iter;
+		iter.Next();
+
+		if(check == ob || (check->flags & FL_SOLID))
+			continue;
+
+		fixed r = check->radius + ob->radius;
+		if(abs(ob->x - check->x) <= r &&
+			abs(ob->y - check->y) <= r)
+			check->Touch(ob);
+	}
+}
+
 static bool TryMove (AActor *ob)
 {
 	if (noclip)
@@ -433,8 +765,78 @@ static bool TryMove (AActor *ob)
 	}
 
 	//
-	// check for actors
+	// check for actors (per-tic collision grid; falls back to the full list
+	// scan between map setup and the first tic, when no grid exists yet)
 	//
+	if(collisionGridMap == map && collisionGridW > 0)
+	{
+		const fixed reach = ob->radius + collisionGridMaxRadius;
+		int cxl = (ob->x - reach) >> TILESHIFT;
+		int cyl = (ob->y - reach) >> TILESHIFT;
+		int cxh = (ob->x + reach) >> TILESHIFT;
+		int cyh = (ob->y + reach) >> TILESHIFT;
+		if(cxl < 0) cxl = 0;
+		if(cyl < 0) cyl = 0;
+		if(cxh >= collisionGridW) cxh = collisionGridW - 1;
+		if(cyh >= collisionGridH) cyh = collisionGridH - 1;
+
+		for (y = cyl;y <= cyh;y++)
+		{
+			for (x = cxl;x <= cxh;x++)
+			{
+				AActor *check = collisionGrid[y * collisionGridW + x];
+				while(check != NULL)
+				{
+					// Touch() may destroy the item, which unlinks it from
+					// this cell -- grab the next pointer first.
+					AActor * const next = check->collisionNext;
+
+					if(check != ob &&
+						// Allow players to clip through each other for now.
+						!(check->player && ob->player))
+					{
+						fixed r = check->radius + ob->radius;
+						if(abs(ob->x - check->x) <= r &&
+							abs(ob->y - check->y) <= r)
+						{
+							if(check->flags & FL_SOLID)
+								return false;
+							check->Touch(ob);
+						}
+					}
+
+					check = next;
+				}
+			}
+		}
+
+		// The handful of oversized actors are checked the old way.
+		for(unsigned int i = 0;i < collisionGridOversized.Size();)
+		{
+			AActor * const check = collisionGridOversized[i];
+			// Touch() may destroy the actor, which removes it from this
+			// list -- only advance when it survived.
+			const unsigned int sizeBefore = collisionGridOversized.Size();
+
+			if(check != ob && !(check->player && ob->player))
+			{
+				fixed r = check->radius + ob->radius;
+				if(abs(ob->x - check->x) <= r &&
+					abs(ob->y - check->y) <= r)
+				{
+					if(check->flags & FL_SOLID)
+						return false;
+					check->Touch(ob);
+				}
+			}
+
+			if(collisionGridOversized.Size() == sizeBefore)
+				++i;
+		}
+
+		return true;
+	}
+
 	for(AActor::Iterator iter = AActor::GetIterator().Next();iter;)
 	{
 		// We need to iterate a little awkwardly since the object may disappear
@@ -894,17 +1296,23 @@ AActor *player_t::FindTarget()
 			if(check == mo)
 				continue;
 
-			if ((check->flags & FL_SHOOTABLE) &&
-				(!check->player || Net::FriendlyFire()) &&
-				mo->CheckVisibility(check, ANGLE_90/9))
-			{
-				const int dist = MAX(abs(check->x - mo->x), abs(check->y - mo->y));
+			if(!(check->flags & FL_SHOOTABLE) ||
+				(check->player && !Net::FriendlyFire()))
+				continue;
 
-				if(dist < viewdist)
-				{
-					viewdist = dist;
-					closest = check;
-				}
+			// Cheap distance gate BEFORE the expensive visibility test
+			// (atan2 + CheckLine): an actor farther than the current best
+			// can never be the closest, so skip it.  Without this every
+			// shot ran a sight trace against every shootable actor in the
+			// level -- a hiccup in crowded rooms.
+			const int dist = MAX(abs(check->x - mo->x), abs(check->y - mo->y));
+			if(dist >= viewdist)
+				continue;
+
+			if(mo->CheckVisibility(check, ANGLE_90/9))
+			{
+				viewdist = dist;
+				closest = check;
 			}
 		}
 

@@ -51,13 +51,13 @@ PC_EXTRA_LIBS += $(shell pkg-config --libs SDL2_mixer 2>/dev/null || echo -lSDL2
 PC_EXTRA_LIBS += $(shell pkg-config --libs SDL2_net 2>/dev/null)
 
 CFLAGS   += -DOF_SDL2_EXTERNAL -DOF_ECWOLF_OPENFPGA \
-	-DOF_ECWOLF_PERF_DISABLED -DBZ_NO_STDIO \
+	-DBZ_NO_STDIO -DUSE_GPL -DOF_ECWOLF_PERF_DISABLED \
 	$(ECWOLF_INCLUDES) -I$(ZLIB_SRC_DIR) -I$(LZMA_SRC_DIR) -I$(BZIP2_SRC_DIR)
 CFLAGS   += -Wno-old-style-definition -Wno-implicit-fallthrough \
 	-Wno-unused-parameter -Wno-unused-function -Wno-unused-variable \
 	-Wno-unused-but-set-variable
 CXXFLAGS += -DOF_SDL2_EXTERNAL -DOF_ECWOLF_OPENFPGA \
-	-DOF_ECWOLF_PERF_DISABLED -DNO_GTK=1
+	-DNO_GTK=1 -DUSE_GPL -DOF_ECWOLF_PERF_DISABLED
 CXXFLAGS += -Dstricmp=strcasecmp -Dstrnicmp=strncasecmp
 CXXFLAGS += -DBZ_NO_STDIO -Icxx_compat $(ECWOLF_INCLUDES) -I$(ZLIB_SRC_DIR) \
 	-I$(LZMA_SRC_DIR) -I$(BZIP2_SRC_DIR) -std=gnu++11 -fexceptions
@@ -92,7 +92,10 @@ BZIP2_SRCS = $(addprefix $(BZIP2_SRC_DIR)/, \
 	blocksort.c bzlib.c compress.c crctable.c decompress.c huffman.c randtable.c)
 
 SRCS     = $(ZLIB_SRCS) $(LZMA_SRCS) $(BZIP2_SRCS) $(ECWOLF_C_SRCS) $(OF_ECWOLF_SRC) $(ECWOLF_MIDI_SRC) $(OF_EH_SRC)
-SRCS_CXX = $(ECWOLF_CXX_SRCS) $(OF_ECWOLF_CD_SRC) $(OF_ECWOLF_CXXABI_SRC) $(OF_ECWOLF_GPU_SRC) $(OF_CXXABI_SRC)
+# DBOPL (GPL) renders AdLib sound effects to PCM at load time; the dosbox/
+# directory stays excluded from the generic scan, only the emulator builds.
+ECWOLF_DBOPL_SRC = $(ECWOLF_SRC_DIR)/dosbox/dbopl.cpp
+SRCS_CXX = $(ECWOLF_CXX_SRCS) $(ECWOLF_DBOPL_SRC) $(OF_ECWOLF_CD_SRC) $(OF_ECWOLF_CXXABI_SRC) $(OF_ECWOLF_GPU_SRC) $(OF_CXXABI_SRC)
 PC_SRCS = $(filter-out $(ECWOLF_MIDI_SRC),$(SRCS))
 PC_SRCS_CXX = $(filter-out $(OF_ECWOLF_CD_SRC) $(OF_ECWOLF_CXXABI_SRC) \
 	$(OF_ECWOLF_GPU_SRC) $(OF_CXXABI_SRC),$(SRCS_CXX))

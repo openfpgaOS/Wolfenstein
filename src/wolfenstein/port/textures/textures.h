@@ -403,7 +403,7 @@ public:
 	void UnloadAll ();
 
 	int NumTextures () const { return (int)Textures.Size(); }
-	void PrecacheLevel (void);
+	void PrecacheLevel (void (*progress)(unsigned done, unsigned total) = NULL);
 
 	void WriteTexture (FArchive &arc, int picnum);
 	int ReadTexture (FArchive &arc);

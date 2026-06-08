@@ -47,6 +47,7 @@
 #include "wl_loadsave.h"
 #include "wl_net.h"
 #include "wl_state.h"
+#include "wl_draw.h"
 #include "id_us.h"
 #include "m_random.h"
 
@@ -180,6 +181,47 @@ void AActor::AddInventory(AInventory *item)
 // This checks if this can see the specified actor. It replaces FL_VISABLE checks.
 bool AActor::CheckVisibility(const AActor *check, angle_t fov) const
 {
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// Integer FOV-cone test -- no atan2.  atan2f is a costly soft-float
+	// call on this CPU, and CheckVisibility runs per shootable actor on
+	// every player shot (FindTarget) and on every enemy attack, so it was
+	// a per-shot hiccup in crowded rooms.  Convention matches the proven
+	// 180-degree fast path in CheckSightTo: facing = (cos a, -sin a), so
+	//   dot = dx*cos(a) - dy*sin(a) = |delta| * FRACUNIT * cos(deviation).
+	// Target is inside the cone iff cos(deviation) >= cos(fov).
+	const int32_t dx = check->x - x;
+	const int32_t dy = check->y - y;
+
+	// Scale the deltas down so dot^2 and cfov^2*len2 stay within int64.
+	const int32_t adx = dx < 0 ? -dx : dx;
+	const int32_t ady = dy < 0 ? -dy : dy;
+	int sh = 0;
+	while((adx >> sh) > 0x3FFF || (ady >> sh) > 0x3FFF)
+		++sh;
+	const int32_t rdx = dx >> sh;
+	const int32_t rdy = dy >> sh;
+
+	const unsigned int fineangle = this->angle >> ANGLETOFINESHIFT;
+	const int64_t dot = (int64_t)rdx * finecosine[fineangle]
+	                  - (int64_t)rdy * finesine[fineangle];
+
+	bool inFov;
+	if(fov >= ANGLE_180)
+		inFov = true;
+	else
+	{
+		const int64_t cfov = finecosine[fov >> ANGLETOFINESHIFT];
+		const int64_t len2 = (int64_t)rdx * rdx + (int64_t)rdy * rdy;
+		const int64_t lhs  = dot * dot;
+		const int64_t rhs  = cfov * cfov * len2;
+		if(cfov >= 0)         // fov <= 90 degrees
+			inFov = (dot > 0) && (lhs >= rhs);
+		else                  // fov > 90 degrees
+			inFov = (dot > 0) || (lhs <= rhs);
+	}
+
+	return inFov && CheckLine(check, this);
+#else
 	float angle = (float) atan2 ((float) (check->y - y), (float) (check->x - x));
 	if (angle<0)
 		angle = (float) (M_PI*2+angle);
@@ -188,6 +230,7 @@ bool AActor::CheckVisibility(const AActor *check, angle_t fov) const
 	angle_t upperAngle = MAX(iangle, this->angle);
 
 	return MIN(upperAngle - lowerAngle, lowerAngle - upperAngle) <= fov && CheckLine(check, this);
+#endif
 }
 
 void AActor::ClearCounters()
@@ -209,6 +252,11 @@ void AActor::ClearInventory()
 
 void AActor::Destroy()
 {
+	// Drop out of the per-tic collision grid first: Touch() during another
+	// actor's TryMove may destroy us mid-scan, and the grid must never hold
+	// a link to a freed actor.
+	UnlinkActorCollision(this);
+
 	Super::Destroy();
 	RemoveFromWorld();
 
@@ -390,6 +438,9 @@ void AActor::Init()
 
 	ObjectFlags |= OF_JustSpawned;
 
+	collisionNext = NULL;
+	collisionCell = -1;
+
 	distance = 0;
 	dir = nodir;
 	soundZone = NULL;
@@ -555,6 +606,12 @@ void AActor::SetState(const Frame *state, bool norun)
 		return;
 	}
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// A state change means there may be work to do again -- wake the actor
+	// if it had gone dormant (see AActor::Tick).
+	ofThinkDormant = false;
+#endif
+
 	this->state = state;
 	sprite = state->spriteInf;
 	ticcount = state->GetTics();
@@ -647,6 +704,18 @@ void AActor::Tick()
 
 	if(flags & FL_MISSILE)
 		T_Projectile(this);
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// Restore the original Wolf3D design: an object now resting on an
+	// infinite-duration frame (ticcount < 0) with no per-tic thinker, that
+	// is neither a missile nor a player, has nothing more to do every tic.
+	// Flag it so the thinker loop stops ticking it.  Decorations, idle
+	// pickups and patrol points all qualify; enemies (non-null thinker) and
+	// animating objects (finite duration) do not.
+	if(ticcount < 0 && state->thinker.pointer == NULL
+		&& !(flags & FL_MISSILE) && player == NULL)
+		ofThinkDormant = true;
+#endif
 }
 
 // Remove an actor from the game world without destroying it.  This will allow

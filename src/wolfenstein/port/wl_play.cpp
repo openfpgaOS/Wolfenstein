@@ -627,7 +627,9 @@ void PollJoystickMove (void)
 			int axis = norm*norm*BASEMOVE*JoySensitivity[axisnum].sensitivity/(10*256*256);
 			if(useam)
 				axis >>= 2;
-			else if(control[ConsolePlayer].buttonstate[bt_run])
+			// Honor "Always run" the same way the digital path does: the run
+			// button inverts the default speed instead of always boosting.
+			else if(alwaysrun ^ control[ConsolePlayer].buttonstate[bt_run])
 				axis <<= 1;
 			if(positive ^ (rawaxis < 0))
 				*(int*)((char*)&control[ConsolePlayer] + scheme->axis) += scheme->negative ? -axis : axis;
@@ -705,6 +707,46 @@ void PollControls (bool absolutes)
 
 	if (joystickenabled && IN_JoyPresent())
 		PollJoystickButtons ();
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// B button: hold = run, tap = use/open on release (matching the Doom
+	// port).  B arrives as both the synthesized Space key and controller
+	// button 1; both bindings' direct Use contribution is swallowed here
+	// and replaced by the tap-on-release, so walking along a wall holding
+	// B never grinds the "do nothing" sound.
+	{
+		TicCmd_t &bcmd = control[ConsolePlayer];
+		static bool bWasHeld = false;
+		static int32_t bPressTics = 0;
+		static int bUseTapFrames = 0;
+
+		const bool bHeld = Keyboard[sc_Space] || (IN_JoyButtons() & 2);
+
+		if(bHeld)
+		{
+			// Suppress B's own Use binding; L2 (PageDown) still uses.
+			if(!Keyboard[sc_PgDn])
+				bcmd.buttonstate[bt_use] = false;
+			bcmd.buttonstate[bt_run] = true;
+			if(!bWasHeld)
+				bPressTics = GetTimeCount();
+		}
+		else if(bWasHeld)
+		{
+			// Released: a tap (< 500 ms = 35 tics) becomes a Use press for
+			// a couple of frames so the 70 Hz game logic can't miss it.
+			if((uint32_t)(GetTimeCount() - bPressTics) < 35)
+				bUseTapFrames = 2;
+		}
+		bWasHeld = bHeld;
+
+		if(bUseTapFrames > 0)
+		{
+			bUseTapFrames--;
+			bcmd.buttonstate[bt_use] = true;
+		}
+	}
+#endif
 
 //
 // get movements
@@ -1320,6 +1362,7 @@ void PlayLoop (void)
 
 				// In single player if the player dies only tick the pawn
 				ticPartStart = OF_WolfPerf_NowUS();
+				RebuildActorCollisionGrid();
 				if(Net::InitVars.mode != Net::MODE_SinglePlayer || players[0].state != player_t::PST_DEAD)
 					thinkerList.Tick();
 				else

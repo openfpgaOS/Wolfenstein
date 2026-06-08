@@ -350,6 +350,10 @@ class GameMap
 		void	SetupLinks();
 		void	ScanTiles();
 		bool	TraverseLink(const Zone *src, const Zone *dest);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		void	FloodReachable(const Zone *z);   // mark hearingReachable[]
+		void	FloodReachableRec(const Zone *src);
+#endif
 		void	UnloadLinks();
 
 		FString	map;
@@ -380,6 +384,15 @@ class GameMap
 		// links that are opened).
 		bool*				zoneTraversed;
 		unsigned short**	zoneLinks;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		// Cached transitive sound reachability flooded from one zone (the
+		// player's, for hearing checks).  All enemies share a single flood
+		// instead of each running their own -- the firing hiccup.  Invalid
+		// only when a link changes (door) or the queried source differs.
+		TArray<bool>		hearingReachable;
+		const Zone*			hearingSource;
+		bool				hearingValid;
+#endif
 
 		TArray<PlayerSpawn> deathmatchStarts;
 		TMap<unsigned int, PlayerSpawn> playerStarts;

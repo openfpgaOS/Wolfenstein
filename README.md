@@ -50,6 +50,12 @@ Optional: `wolfmidi.zip` in the same folder replaces the AdLib soundtrack with
 a MIDI music pack played through the Pocket's hardware sample-based MIDI
 synth.
 
+Optional: `sfxcache.ofx` is a pre-rendered pack of all AdLib sound effects
+(rendered at the OPL2's native rate). Without it, the core synthesizes the
+same sounds on the device during level loads — the cache just sounds
+marginally cleaner and loads faster. Regenerate it from your own game data
+with `scripts/sfxcache.sh <path-to-common>`.
+
 ### 3. Play
 
 Pocket menu → **openFPGA → Wolfenstein** → pick the game. Saves (10 slots per
@@ -67,7 +73,7 @@ game) and settings persist automatically under `Saves/wolfenstein/`.
 | Left stick (dock) | Move forward / back, strafe left / right |
 | Right stick (dock) | Turn |
 | **A** | Fire |
-| **B** | Open doors / use |
+| **B** | Tap: open doors / use — hold: run |
 | **X** / **Y** | Run + strafe modifier (hold and turn to strafe) |
 | **L1** / **R1** | Strafe left / right |
 | **L2** | Open doors / use |

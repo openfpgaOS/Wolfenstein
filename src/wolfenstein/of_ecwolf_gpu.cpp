@@ -136,6 +136,73 @@ static GpuMaskCacheEntry gpu_mask_cache_last;
 static bool gpu_tex_flush_pending;
 
 #if OF_ECWOLF_PERF_ENABLED
+/* Per-class thinker timing: ThinkerList::Tick samples each thinker's Tick()
+ * and the report prints the top classes by accumulated time -- the direct
+ * answer to "what are the thinkers doing all frame". */
+struct WolfPerfThinkerSlot
+{
+	const void *key;
+	const char *name;
+	uint64_t us;
+	uint32_t calls;
+};
+static WolfPerfThinkerSlot wolf_perf_thinkers[24];
+static bool wolf_perf_thinker_sampling;
+
+// Sampling costs two timer reads per thinker (rdcycle traps on this core,
+// so the only clock is the slow MMIO microsecond counter).  Only every
+// 16th tic is sampled; the report scales by 16 so magnitudes stay readable.
+void OF_WolfPerf_SetThinkerSampling(int enabled)
+{
+	wolf_perf_thinker_sampling = enabled != 0;
+}
+
+int OF_WolfPerf_ThinkerSamplingEnabled(void)
+{
+	return wolf_perf_thinker_sampling ? 1 : 0;
+}
+
+extern "C" void OF_WolfPerf_ThinkerSample(const void *key, const char *name,
+                                          uint32_t us)
+{
+	for(unsigned int i = 0; i < 24; ++i)
+	{
+		WolfPerfThinkerSlot &slot = wolf_perf_thinkers[i];
+		if(slot.key == key || slot.key == NULL)
+		{
+			slot.key = key;
+			slot.name = name;
+			slot.us += us;
+			slot.calls++;
+			return;
+		}
+	}
+}
+
+static void OF_WolfPerf_ThinkerReport()
+{
+	// Top 6 by time, then reset.
+	for(int rank = 0; rank < 6; ++rank)
+	{
+		int best = -1;
+		for(unsigned int i = 0; i < 24; ++i)
+		{
+			if(wolf_perf_thinkers[i].key == NULL || wolf_perf_thinkers[i].us == 0)
+				continue;
+			if(best < 0 || wolf_perf_thinkers[i].us > wolf_perf_thinkers[(unsigned)best].us)
+				best = (int)i;
+		}
+		if(best < 0)
+			break;
+		WolfPerfThinkerSlot &slot = wolf_perf_thinkers[(unsigned)best];
+		printf("  thk %s=%uus n=%u (x16)\n", slot.name,
+			(unsigned)(slot.us * 16), (unsigned)(slot.calls * 16));
+		slot.us = 0;
+	}
+	memset(wolf_perf_thinkers, 0, sizeof(wolf_perf_thinkers));
+}
+
+
 static uint64_t wolf_perf_accum[OF_WOLF_PERF_COUNT];
 static uint64_t wolf_perf_frame_total;
 static uint64_t wolf_perf_tic_total;

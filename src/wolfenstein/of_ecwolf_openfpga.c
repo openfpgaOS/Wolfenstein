@@ -145,6 +145,8 @@ static void of_ecwolf_openfpga_init(void)
     of_file_slot_register(7, "bank.ofsf");
     of_ecwolf_log_bank_status();
     of_file_slot_register(8, "ecwolf.cfg");
+    /* Host-rendered AdLib SFX cache (scripts/sfxcache.sh); optional. */
+    of_file_slot_register(26, "sfxcache.ofx");
     /* No disc image to mount: the game's AUDIOHED/AUDIOT/GAMEMAPS/MAPHEAD/
      * VGADICT/VGAGRAPH/VGAHEAD/VSWAP files are bound to data slots by the
      * instance and auto-discovered, so ECWolf finds them directly in the

@@ -106,6 +106,7 @@ class SoundInformation
 		SoundIndex		FindSound(const char* logical) const;
 		void			Init();
 		SoundIndex		PumpDigitalLoads(int maxLoads=1);
+		unsigned int	DigitalLoadsPending() const { return digitalLoadQueue.Size(); }
 		void			QueueDigitalLoad(const SoundIndex &index);
 		void			QueueAllDigitalLoads();
 		const SoundData	&operator[] (const char* logical) const { return operator[](FindSound(logical)); }

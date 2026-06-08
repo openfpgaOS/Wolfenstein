@@ -333,6 +333,16 @@
                     "n3d"
                 ],
                 "deferload": true
+            },
+            {
+                "id": 26,
+                "name": "SFX Cache",
+                "required": false,
+                "parameters": 0,
+                "extensions": [
+                    "ofx"
+                ],
+                "deferload": true
             }
         ]
     }

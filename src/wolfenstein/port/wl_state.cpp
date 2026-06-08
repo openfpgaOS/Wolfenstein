@@ -76,25 +76,9 @@ static void FirstSighting (AActor *ob, const Frame *state);
 // Determines if the MapSpot is open to receive a monster
 bool TrySpot(AActor *ob, MapSpot spot)
 {
-	unsigned int x = spot->GetX();
-	unsigned int y = spot->GetY();
-
-	for(AActor::Iterator iter = AActor::GetIterator();iter.Next();)
-	{
-		// We want to check where the actor is heading instead of the exact
-		// tile it exists in since this is essentially how Wolf3D handled things
-		// We must first determine if the monster has moved into the destination
-		// tile or not.  (Half way to destination.)
-
-		const dirtype offsetDir = iter->distance >= TILEGLOBAL/2 ? iter->dir : nodir;
-
-		// Players need not be checked
-		if(iter != ob && !iter->player && (iter->flags & FL_SOLID) &&
-			static_cast<unsigned int>(iter->tilex+dirdeltax[offsetDir]) == x &&
-			static_cast<unsigned int>(iter->tiley+dirdeltay[offsetDir]) == y)
-			return false;
-	}
-	return true;
+	// Candidates come from the per-tic collision grid (wl_agent.cpp); the
+	// original whole-list predicate runs only on the few nearby actors.
+	return !ActorBlocksSpot(ob, spot->GetX(), spot->GetY());
 }
 
 /*
@@ -723,20 +707,9 @@ bool MoveObj (AActor *ob, int32_t move)
 	}
 	ob->distance -=move;
 
-	// Check for touching objects
-	for(AActor::Iterator iter = AActor::GetIterator().Next();iter;)
-	{
-		AActor *check = iter;
-		iter.Next();
-
-		if(check == ob || (check->flags & FL_SOLID))
-			continue;
-
-		fixed r = check->radius + ob->radius;
-		if(abs(ob->x - check->x) <= r &&
-			abs(ob->y - check->y) <= r)
-			check->Touch(ob);
-	}
+	// Check for touching objects (grid candidates; this was a whole-list
+	// scan per moving enemy per tic -- see TouchActorsNear)
+	TouchActorsNear(ob);
 
 	return true;
 }
@@ -873,6 +846,11 @@ bool CheckLine (const AActor *ob, const AActor *ob2)
 	if (!ob2)
 		return false;
 
+	// Dense solidity bytes (wl_agent.cpp): empty and plain-wall steps stay
+	// out of the fat MapSpot structs; only doors/sliders consult the spot.
+	int tfw = 0, tfh = 0;
+	const unsigned char *tflags = SimTileFlags(&tfw, &tfh);
+
 	x1 = ob->x >> UNSIGNEDSHIFT;            // 1/256 tile precision
 	y1 = ob->y >> UNSIGNEDSHIFT;
 	xt1 = x1 >> 8;
@@ -921,26 +899,46 @@ bool CheckLine (const AActor *ob, const AActor *ob2)
 			y = yfrac>>8;
 			yfrac += ystep;
 
-			MapSpot spot = map->GetSpot(x, y, 0);
-			
-			if (!spot->tile)
+			const unsigned char tf = tflags != NULL ?
+				tflags[y * tfw + x] : (unsigned char)0xFF;
+			if (tf == 1)
+				return false;
+
+			if (tf == 0)
 			{
-				if (CheckAdjacentTileBlockage(x, y, lastx, lasty))
-					return false;
+				// Empty tile: only the diagonal corner rule can block.
+				if (abs(lastx - x) == 1 && abs(lasty - y) == 1)
+				{
+					const int ax = lastx > x ? x + 1 : x - 1;
+					const int ay = lasty > y ? y + 1 : y - 1;
+					if ((unsigned)ax < (unsigned)tfw &&
+						(unsigned)ay < (unsigned)tfh &&
+						tflags[y * tfw + ax] && tflags[ay * tfw + x])
+						return false;
+				}
 			}
-			else 
+			else
 			{
-				if (spot->slideAmount[direction] == 0)
-					return false;
+				MapSpot spot = map->GetSpot(x, y, 0);
 
-				//
-				// see if the door is open enough
-				//
-				intercept = yfrac - ystep / 2;
+				if (!spot->tile)
+				{
+					if (CheckAdjacentTileBlockage(x, y, lastx, lasty))
+						return false;
+				}
+				else
+				{
+					if (spot->slideAmount[direction] == 0)
+						return false;
 
-				if (!CheckSlidePass(spot->slideStyle, intercept, spot->slideAmount[direction]))
-					return false;
+					//
+					// see if the door is open enough
+					//
+					intercept = yfrac - ystep / 2;
 
+					if (!CheckSlidePass(spot->slideStyle, intercept, spot->slideAmount[direction]))
+						return false;
+				}
 			}
 			lastx = x;
 			lasty = y;
@@ -987,25 +985,46 @@ bool CheckLine (const AActor *ob, const AActor *ob2)
 			x = xfrac>>8;
 			xfrac += xstep;
 
-			MapSpot spot = map->GetSpot(x, y, 0);
+			const unsigned char tf = tflags != NULL ?
+				tflags[y * tfw + x] : (unsigned char)0xFF;
+			if (tf == 1)
+				return false;
 
-			if (!spot->tile)
+			if (tf == 0)
 			{
-				if (CheckAdjacentTileBlockage(x, y, lastx, lasty))
-					return false;
+				// Empty tile: only the diagonal corner rule can block.
+				if (abs(lastx - x) == 1 && abs(lasty - y) == 1)
+				{
+					const int ax = lastx > x ? x + 1 : x - 1;
+					const int ay = lasty > y ? y + 1 : y - 1;
+					if ((unsigned)ax < (unsigned)tfw &&
+						(unsigned)ay < (unsigned)tfh &&
+						tflags[y * tfw + ax] && tflags[ay * tfw + x])
+						return false;
+				}
 			}
-			else 
+			else
 			{
-				if (spot->slideAmount[direction] == 0)
-					return false;
+				MapSpot spot = map->GetSpot(x, y, 0);
 
-				//
-				// see if the door is open enough
-				//
-				intercept = xfrac - xstep / 2;
+				if (!spot->tile)
+				{
+					if (CheckAdjacentTileBlockage(x, y, lastx, lasty))
+						return false;
+				}
+				else
+				{
+					if (spot->slideAmount[direction] == 0)
+						return false;
 
-				if (intercept>spot->slideAmount[direction])
-					return false;
+					//
+					// see if the door is open enough
+					//
+					intercept = xfrac - xstep / 2;
+
+					if (intercept>spot->slideAmount[direction])
+						return false;
+				}
 			}
 			lastx = x;
 			lasty = y;

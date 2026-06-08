@@ -138,6 +138,23 @@ MENU_LISTENER(SetSoundEffects)
 	}
 	return true;
 }
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+MENU_LISTENER(SetMusicOnOff)
+{
+	// "On" = smm_AdLib, the mode existing configs already use; on this port
+	// any non-off music mode plays the wolfmidi.zip replacement through the
+	// hardware MIDI synth.
+	const SMMode mode = which == 0 ? smm_Off : smm_AdLib;
+	if(MusicMode != mode)
+	{
+		SD_SetMusicMode(mode);
+		if(mode != smm_Off)
+			StartCPMusic(gameinfo.MenuMusic);
+	}
+	return true;
+}
+#endif
+
 MENU_LISTENER(SetDigitalSound)
 {
 	if(DigiMode != (which == 0 ? sds_Off : sds_SoundBlaster))
@@ -481,6 +498,7 @@ void CreateMenus()
 		case smm_Midi: musicMode = 2; break;
 	}
 	soundBase.setHeadText(language["STR_SOUNDCONFIG"]);
+#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 	soundBase.addItem(new LabelMenuItem(language["STR_DIGITALDEVICE"]));
 	soundBase.addItem(new MultipleChoiceMenuItem(SetDigitalSound, digitizedOptions, 2, digitizedMode));
 	soundBase.addItem(new SliderMenuItem(SoundVolume, 150, MAX_VOLUME, language["STR_SOFT"], language["STR_LOUD"]));
@@ -490,6 +508,21 @@ void CreateMenus()
 	soundBase.addItem(new LabelMenuItem(language["STR_MUSICDEVICE"]));
 	soundBase.addItem(new MultipleChoiceMenuItem(SetMusic, musicOptions, 3, musicMode));
 	soundBase.addItem(new SliderMenuItem(MusicVolume, 150, MAX_VOLUME, language["STR_SOFT"], language["STR_LOUD"], SD_UpdateMusicVolume));
+#else
+	// Pocket: two honest sections.  All effects -- digitized and the
+	// pre-rendered AdLib scripts -- play through the digitized path, and
+	// music is the hardware MIDI synth, so DOS device names ("Digitized
+	// Device", "AdLib", "SoundBlaster") would only mislead here.
+	(void)digitizedMode; (void)musicMode; (void)soundEffectsMode;
+	(void)digitizedOptions; (void)musicOptions; (void)soundEffectsOptions;
+	const char* onOffOptions[] = { "Off", "On" };
+	soundBase.addItem(new LabelMenuItem("Sound Effects"));
+	soundBase.addItem(new MultipleChoiceMenuItem(SetDigitalSound, onOffOptions, 2, DigiMode == sds_Off ? 0 : 1));
+	soundBase.addItem(new SliderMenuItem(SoundVolume, 150, MAX_VOLUME, language["STR_SOFT"], language["STR_LOUD"]));
+	soundBase.addItem(new LabelMenuItem("Music"));
+	soundBase.addItem(new MultipleChoiceMenuItem(SetMusicOnOff, onOffOptions, 2, MusicMode == smm_Off ? 0 : 1));
+	soundBase.addItem(new SliderMenuItem(MusicVolume, 150, MAX_VOLUME, language["STR_SOFT"], language["STR_LOUD"], SD_UpdateMusicVolume));
+#endif
 
 	controlBase.setHeadPicture("M_CONTRL");
 	controlBase.addItem(new BooleanMenuItem(language["STR_ALWAYSRUN"], alwaysrun, EnterControlBase));

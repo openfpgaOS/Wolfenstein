@@ -18,6 +18,21 @@
 extern  AActor   *LastAttacker;
 
 void    CheckSpawnPlayer (bool setup=false);
+void    RebuildActorCollisionGrid ();
+void    UnlinkActorCollision (class AActor *ob);
+bool    ActorBlocksSpot (class AActor *ob, unsigned int x, unsigned int y);
+void    TouchActorsNear (class AActor *ob);
+// Flat per-tile solidity classification rebuilt each tic alongside the
+// collision grid: 0 = empty, 1 = blocked from every direction, 2 = consult
+// the MapSpot (doors / sliding walls).  NULL when no tic has run yet.
+const unsigned char *SimTileFlags (int *width, int *height);
+// Patch one tile's byte after a mutation (spot is a MapSpot; typed as void*
+// to keep this header free of gamemap.h).  Call sites: SetTile, the door/
+// slider slideAmount writers.
+void SimTileFlagsDirtySpot (const void *spot);
+// Drop per-level caches; called from SetupGameLevel (allocator address
+// reuse makes bare pointer-equality checks unreliable across level loads).
+void InvalidateSimTileCaches ();
 void    SpawnPlayer (int num);
 
 //

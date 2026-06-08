@@ -1343,7 +1343,7 @@ int FTextureManager::CountLumpTextures (int lumpnum)
 //
 //===========================================================================
 
-void FTextureManager::PrecacheLevel (void)
+void FTextureManager::PrecacheLevel (void (*progress)(unsigned done, unsigned total))
 {
 	BYTE *hitlist;
 	// We use +1 to account for unknown textures
@@ -1373,6 +1373,9 @@ void FTextureManager::PrecacheLevel (void)
 		}
 		else
 			tex->Unload();
+
+		if(progress)
+			progress((unsigned)(cnt - i), (unsigned)cnt);
 	}
 
 	// Unused textures were just freed (any class, including mod formats);

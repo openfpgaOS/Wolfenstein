@@ -217,7 +217,9 @@ void SoundInformation::QueueDigitalLoad(const SoundIndex &index)
 		return;
 
 	SoundData &data = sounds[soundIndex];
-	if(data.lump[SoundData::DIGITAL] == -1 || data.digitalData)
+	// AdLib-only sounds are also queued: they get pre-rendered to PCM.
+	if((data.lump[SoundData::DIGITAL] == -1 &&
+		data.lump[SoundData::ADLIB] == -1) || data.digitalData)
 		return;
 
 	for(unsigned int i = 0;i < digitalLoadQueue.Size();++i)
@@ -254,10 +256,15 @@ SoundIndex SoundInformation::PumpDigitalLoads(int maxLoads)
 			continue;
 
 		SoundData &data = sounds[soundIndex];
-		if(data.lump[SoundData::DIGITAL] == -1 || data.digitalData)
+		if(data.digitalData)
 			continue;
 
-		data.digitalData.Reset(SD_PrepareSound(data.lump[SoundData::DIGITAL]));
+		if(data.lump[SoundData::DIGITAL] != -1)
+			data.digitalData.Reset(SD_PrepareSound(data.lump[SoundData::DIGITAL]));
+		else if(data.lump[SoundData::ADLIB] != -1)
+			data.digitalData.Reset(SD_PrepareAdLibSound(data.lump[SoundData::ADLIB]));
+		else
+			continue;
 		if(data.digitalData)
 			loaded = SoundIndex(soundIndex);
 	}

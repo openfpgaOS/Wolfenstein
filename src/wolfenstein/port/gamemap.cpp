@@ -299,9 +299,64 @@ bool GameMap::CheckLink(const Zone *zone1, const Zone *zone2, bool recurse)
 	if(!recurse || straightCheck)
 		return straightCheck;
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// Transitive reachability is symmetric.  Every recursive CheckLink
+	// caller passes the player's zone as zone2, so flood once from zone2
+	// and let all enemies share the result (cached until a link changes or
+	// the queried zone differs).  Reachability is identical to the flood.
+	if(zonePalette.Size() > 0)
+	{
+		if(!hearingValid || hearingSource != zone2)
+		{
+			FloodReachable(zone2);
+			hearingSource = zone2;
+			hearingValid = true;
+		}
+		return hearingReachable[zone1->index];
+	}
+#endif
+
 	memset(zoneTraversed, 0, sizeof(bool)*zonePalette.Size());
 	return TraverseLink(zone1, zone2);
 }
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+// Mark every zone reachable from `z` over open links into hearingReachable[]
+// (uses hearingReachable itself as the visited set -- same link logic as
+// TraverseLink, but flooding the whole component instead of seeking a dest).
+void GameMap::FloodReachable(const Zone *z)
+{
+	const unsigned int n = zonePalette.Size();
+	if(hearingReachable.Size() < n)
+		hearingReachable.Resize(n);
+	for(unsigned int i = 0;i < n;++i)
+		hearingReachable[i] = false;
+
+	// Iterative flood using zoneTraversed as the work stack's value store is
+	// awkward; recurse like TraverseLink (zone graphs are tiny, ~tens).
+	FloodReachableRec(z);
+}
+
+void GameMap::FloodReachableRec(const Zone *src)
+{
+	hearingReachable[src->index] = true;
+	unsigned int ofs = src->index;
+	unsigned int i = zonePalette.Size() - src->index;
+	while(--i > 0)
+	{
+		if(!hearingReachable[i + ofs] && zoneLinks[ofs][i] > 0)
+			FloodReachableRec(&zonePalette[i + ofs]);
+	}
+	while(i < src->index)
+	{
+		if(!hearingReachable[i] && zoneLinks[i][ofs] > 0)
+			FloodReachableRec(&zonePalette[i]);
+		--ofs;
+		++i;
+	}
+}
+#endif
+
 bool GameMap::TraverseLink(const Zone* src, const Zone* dest)
 {
 	// Mark this node as checked
@@ -486,6 +541,9 @@ void GameMap::LinkZones(const Zone *zone1, const Zone *zone2, bool open)
 	}
 	else
 		++value;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	hearingValid = false;   // connectivity changed; recompute on next query
+#endif
 }
 
 void GameMap::LoadMap(bool loadingSave)
@@ -585,6 +643,10 @@ void GameMap::SetupLinks()
 	byte* zoneData = new byte[zdSize + sizeof(unsigned short*)*zonePalette.Size()];
 	memset(zoneData, 0, zdSize);
 	zoneTraversed = reinterpret_cast<bool*>(zoneData);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	hearingValid = false;
+	hearingSource = NULL;
+#endif
 
 	// Set up the table
 	unsigned short* ptr = reinterpret_cast<unsigned short*>(zoneData + sizeof(bool)*zonePalette.Size());
@@ -753,6 +815,7 @@ void GameMap::Plane::Map::SetTile(const MapTile *tile)
 		else
 			SetSideSolid(i, false);
 	}
+	SimTileFlagsDirtySpot(this);
 }
 
 const FTextureID &GameMap::Plane::Map::GetTexture(unsigned int side) const

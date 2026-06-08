@@ -37,6 +37,12 @@
 
 #include "farchive.h"
 #include "thinker.h"
+#include "of_ecwolf_gpu.h"
+
+#if OF_ECWOLF_PERF_ENABLED
+extern "C" void OF_WolfPerf_ThinkerSample(const void *key, const char *name,
+                                          uint32_t us);
+#endif
 #include "thingdef/thingdef.h"
 #include "wl_def.h"
 #include "wl_game.h"
@@ -113,8 +119,15 @@ void ThinkerList::Tick(Priority list)
 
 		if(!(thinker->ObjectFlags & OF_EuthanizeMe))
 		{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+			// Skip static objects (decorations, idle pickups, patrol
+			// points): they rest on an infinite frame with no thinker, so
+			// ticking them is wasted work.  SetState clears the flag if
+			// anything changes their state.
+			if(!thinker->ofThinkDormant)
+				thinker->Tick();
+#else
 			thinker->Tick();
-#if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 			GC::CheckGC();
 #endif
 		}
@@ -199,6 +212,7 @@ IMPLEMENT_ABSTRACT_CLASS(Thinker)
 
 Thinker::Thinker(ThinkerList::Priority priority)
 {
+	ofThinkDormant = false;
 	Activate(priority);
 }
 
@@ -222,6 +236,7 @@ void Thinker::Destroy()
 void Thinker::Init()
 {
 	Super::Init();
+	ofThinkDormant = false;
 	EmbeddedList<Thinker>::List::ValidateNode(this);
 }
 

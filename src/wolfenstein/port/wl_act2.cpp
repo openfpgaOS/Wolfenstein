@@ -4,6 +4,7 @@
 #include <climits>
 #include <math.h>
 #include "actor.h"
+#include "of_ecwolf_gpu.h"
 #include "m_random.h"
 #include "wl_act.h"
 #include "wl_def.h"
