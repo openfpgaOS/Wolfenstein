@@ -24,11 +24,11 @@
             },
             {
                 "id": 5,
-                "filename": "SOD-M2/AUDIOHED.SOD"
+                "filename": "AUDIOHED.sd2"
             },
             {
                 "id": 6,
-                "filename": "SOD-M2/AUDIOT.SOD"
+                "filename": "AUDIOT.sd2"
             },
             {
                 "id": 7,
@@ -80,27 +80,27 @@
             },
             {
                 "id": 20,
-                "filename": "SOD-M2/MAPHEAD.SOD"
+                "filename": "MAPHEAD.sd2"
             },
             {
                 "id": 21,
-                "filename": "SOD-M2/VGADICT.SOD"
+                "filename": "VGADICT.sd2"
             },
             {
                 "id": 22,
-                "filename": "SOD-M2/VGAGRAPH.SOD"
+                "filename": "VGAGRAPH.sd2"
             },
             {
                 "id": 23,
-                "filename": "SOD-M2/VGAHEAD.SOD"
+                "filename": "VGAHEAD.sd2"
             },
             {
                 "id": 24,
-                "filename": "SOD-M2/VSWAP.SOD"
+                "filename": "VSWAP.sd2"
             },
             {
                 "id": 25,
-                "filename": "SOD-M2/GAMEMAPS.SOD"
+                "filename": "GAMEMAPS.sd2"
             },
             {
                 "id": 26,
