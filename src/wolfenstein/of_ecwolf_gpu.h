@@ -59,6 +59,22 @@ static inline void OF_WolfPerf_AddTicks(unsigned int) {}
 static inline void OF_WolfPerf_FrameEnd(void) {}
 #endif
 
+/* A single perspective-correct texture plane for a floor/ceiling half.  Each
+ * attribute is evaluated by the GPU as base + u*du + v*dv, where u is the minor
+ * (per-pixel, along the span) axis and v is the major (per-scanline) axis.
+ * szi/tzi are the texel*zi numerators ((texel_q16 * zi) >> 16) and zi is the
+ * perspective denominator (1/z); the GPU divides szi/zi and tzi/zi per pixel.
+ * light is a Q6.16 shade-row ramp (low 6 bits select the palookup row). One
+ * plane drives every scanline of the half through a single param-span command
+ * instead of one affine span per row. */
+typedef struct OFWolfTexturedPlane
+{
+	int32_t szi_origin, szi_du, szi_dv;
+	int32_t tzi_origin, tzi_du, tzi_dv;
+	int32_t zi_origin,  zi_du,  zi_dv;
+	int32_t light_origin, light_du, light_dv;
+} OFWolfTexturedPlane;
+
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 void OF_WolfGPU_Init(void);
 void OF_WolfGPU_Shutdown(void);
@@ -93,6 +109,10 @@ bool OF_WolfGPU_DrawSpan(uint8_t *dest, int count, const uint8_t *source,
 	int sstep, int tstep, int light);
 bool OF_WolfGPU_ClearSpan(uint8_t *dest, int count, uint8_t color);
 bool OF_WolfGPU_ClearRect(uint8_t *dest, int width, int height, uint8_t color);
+bool OF_WolfGPU_HasTexturedPlane(void);
+bool OF_WolfGPU_DrawTexturedPlane(uint8_t *dest, int pitch, int rows, int count,
+	const uint8_t *source, int tex_width, int tex_height,
+	const OFWolfTexturedPlane *plane);
 #else
 static inline void OF_WolfGPU_Init(void) {}
 static inline void OF_WolfGPU_Shutdown(void) {}
@@ -124,6 +144,9 @@ static inline bool OF_WolfGPU_DrawSpan(uint8_t *, int, const uint8_t *,
 	int, int, int, int, int, int, int) { return false; }
 static inline bool OF_WolfGPU_ClearSpan(uint8_t *, int, uint8_t) { return false; }
 static inline bool OF_WolfGPU_ClearRect(uint8_t *, int, int, uint8_t) { return false; }
+static inline bool OF_WolfGPU_HasTexturedPlane(void) { return false; }
+static inline bool OF_WolfGPU_DrawTexturedPlane(uint8_t *, int, int, int,
+	const uint8_t *, int, int, const OFWolfTexturedPlane *) { return false; }
 #endif
 
 #endif

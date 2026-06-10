@@ -79,6 +79,20 @@ static int gpu_batch_tex_w_mask;
 static int gpu_batch_tex_h_mask;
 static int gpu_batch_fb_step;
 
+/* Set once at init if the core advertises CMD_DRAW_COLUMN_LIST (0x4C).  Wall
+ * and sprite columns are 1-wide (tex_width == 1) with s == 0 / sstep == 0, so
+ * they qualify for the column-list path, which drops those always-0 words
+ * (5-word lanes vs 7).  Output is byte-identical to the affine group, so the
+ * affine path stays the fallback when the bit is clear. */
+static bool gpu_have_column_list;
+
+/* Set at init if the core supports parametric perspective span lists
+ * (DRAW_PARAM_SPAN_LIST + perspective).  Lets a textured floor/ceiling half
+ * ship one perspective plane + per-row records instead of one affine span per
+ * scanline.  Cleared by OF_ECWOLF_NO_PERSP_FLOOR to A/B against the affine
+ * path. */
+static bool gpu_have_param_persp;
+
 /* Region-scoped CPU<->GPU coherence.
  *
  * The GPU is an asynchronous span rasterizer: draw commands are staged and the
@@ -331,7 +345,39 @@ static void gpu_flush_batch()
 		return;
 
 	gpu_batch.lane_count = (uint8_t)gpu_batch_count;
-	of_gpu_draw_affine_span_group(&gpu_batch);
+
+	// 1-wide column batches (walls, sprites, sky) carry s == 0 / sstep == 0 on
+	// every lane, so emit them through the leaner 0x4C column-list when the core
+	// supports it.  The framebuffer result is byte-identical to the affine group
+	// (per of_gpu.h), and textured floor/ceiling spans (tex_width > 1) keep using
+	// the affine path.
+	if(gpu_have_column_list && gpu_batch_tex_width == 1)
+	{
+		of_gpu_column_list_group_t col;
+		col.lane_count = gpu_batch.lane_count;
+		col.flags = gpu_batch.flags;
+		col.reserved[0] = 0;
+		col.reserved[1] = 0;
+		col.tex_width = gpu_batch.tex_width;
+		col.tex_w_mask = gpu_batch.tex_w_mask;
+		col.tex_h_mask = gpu_batch.tex_h_mask;
+		col.fb_step = gpu_batch.fb_step;
+		for(int i = 0; i < gpu_batch_count; ++i)
+		{
+			col.fb_addr[i] = gpu_batch.fb_addr[i];
+			col.tex_addr[i] = gpu_batch.tex_addr[i];
+			col.count[i] = gpu_batch.count[i];
+			col.t[i] = gpu_batch.t[i];
+			col.tstep[i] = gpu_batch.tstep[i];
+			col.light[i] = gpu_batch.light[i];
+			col.colormap_id[i] = gpu_batch.colormap_id[i];
+		}
+		of_gpu_draw_column_list(&col);
+	}
+	else
+	{
+		of_gpu_draw_affine_span_group(&gpu_batch);
+	}
 	gpu_batch_count = 0;
 	gpu_frame_dirty = true;
 }
@@ -795,8 +841,16 @@ void OF_WolfGPU_Init(void)
 		of_gpu_init();
 		of_cache_flush();
 		gpu_available = true;
+		gpu_have_column_list =
+			of_has_feature(OF_HW_GPU_COLUMN_LIST) != 0;
+		gpu_have_param_persp =
+			of_has_feature(OF_HW_GPU_PARAM_SPAN_LIST) != 0 &&
+			of_has_feature(OF_HW_GPU_PERSP) != 0 &&
+			getenv("OF_ECWOLF_NO_PERSP_FLOOR") == NULL;
 		gpu_reset_source_cache();
-		printf("OpenFPGA GPU: hardware command path enabled.\n");
+		printf("OpenFPGA GPU: hardware command path enabled%s%s.\n",
+			gpu_have_column_list ? " (column-list)" : "",
+			gpu_have_param_persp ? " (persp-planes)" : "");
 	}
 
 	if(!gpu_available || gpu_colormap_uploaded || NormalLight.Maps == NULL)
@@ -1514,6 +1568,79 @@ bool OF_WolfGPU_ClearRect(uint8_t *dest, int width, int height, uint8_t color)
 	gpu_flush_batch();
 	of_gpu_clear_rect_strided((uint32_t)(uintptr_t)dest, (uint16_t)width,
 		(uint16_t)height, (uint16_t)gpu_pitch, color);
+	gpu_frame_dirty = true;
+	return true;
+}
+
+bool OF_WolfGPU_HasTexturedPlane(void)
+{
+	return gpu_available && gpu_have_param_persp;
+}
+
+/* One perspective param-span list covers an entire textured floor/ceiling half:
+ * a single plane header plus one {u=0, v=row, count} record per scanline, versus
+ * one affine span per row.  With zi == rowDistance the GPU's szi/zi divide
+ * reproduces exactly the per-pixel texel the affine path sampled, so the image
+ * matches while command traffic collapses from O(rows) spans to one command. */
+bool OF_WolfGPU_DrawTexturedPlane(uint8_t *dest, int pitch, int rows, int count,
+	const uint8_t *source, int tex_width, int tex_height,
+	const OFWolfTexturedPlane *plane)
+{
+	static of_gpu_param_span_record_t records[OF_GPU_PARAM_SPAN_MAX_RECORDS];
+
+	if(!gpu_available || !gpu_frame_active || !gpu_have_param_persp)
+		return false;
+	if(dest == NULL || source == NULL || plane == NULL)
+		return gpu_reject();
+	if(rows <= 0 || rows > (int)OF_GPU_PARAM_SPAN_MAX_RECORDS)
+		return gpu_reject();
+	if(count <= 0 || count > 65535 || pitch <= 0)
+		return gpu_reject();
+	if(!gpu_is_power_of_two(tex_width) || !gpu_is_power_of_two(tex_height))
+		return gpu_reject();
+	if(!gpu_rect_within_active_frame(dest, count, rows, pitch))
+		return gpu_reject();
+
+	gpu_prepare_for_gpu_write();
+	gpu_flush_batch();
+	gpu_make_source_visible(source, (uint32_t)(tex_width * tex_height));
+
+	of_gpu_param_span_list_t p;
+	memset(&p, 0, sizeof(p));
+	p.fb_base = (uint32_t)(uintptr_t)dest;
+	p.fb_major_step = pitch;   // per scanline (major / v)
+	p.fb_minor_step = 1;       // per pixel (minor / u)
+	p.tex_addr = (uint32_t)(uintptr_t)source;
+	p.tex_width = (uint16_t)tex_width;
+	p.tex_w_mask = (uint16_t)(tex_width - 1);
+	p.tex_h_mask = (uint16_t)(tex_height - 1);
+	p.flags = OF_GPU_SPAN_COLORMAP | OF_GPU_SPAN_PERSP;
+	p.colormap_id = 0;
+	p.attr_mode = OF_GPU_PARAM_ATTR_PERSP;
+	p.span_axis = OF_GPU_PARAM_AXIS_X;
+	p.z_mode = OF_GPU_PARAM_Z_NONE;
+	p.attr_origin[0] = plane->szi_origin;
+	p.attr_du[0]     = plane->szi_du;
+	p.attr_dv[0]     = plane->szi_dv;
+	p.attr_origin[1] = plane->tzi_origin;
+	p.attr_du[1]     = plane->tzi_du;
+	p.attr_dv[1]     = plane->tzi_dv;
+	p.attr_origin[2] = plane->zi_origin;
+	p.attr_du[2]     = plane->zi_du;
+	p.attr_dv[2]     = plane->zi_dv;
+	p.light_origin = plane->light_origin;
+	p.light_du     = plane->light_du;
+	p.light_dv     = plane->light_dv;
+	// clamp_min/clamp_max stay 0 (disabled): the tile wraps via tex_*_mask.
+
+	for(int i = 0; i < rows; ++i)
+	{
+		records[i].u = 0;
+		records[i].v = (uint16_t)i;
+		records[i].count = (uint16_t)count;
+	}
+
+	of_gpu_draw_param_span_list(&p, records, (uint32_t)rows);
 	gpu_frame_dirty = true;
 	return true;
 }

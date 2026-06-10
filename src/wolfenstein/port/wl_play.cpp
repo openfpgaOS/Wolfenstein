@@ -867,15 +867,38 @@ void BumpGamma()
 }
 
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+// Cycling GPU video buffers (matches SDLFB::GetPageCount() for the direct
+// framebuffer); the play-screen background must be repainted into each so a
+// shrunk view never shows stale menu pixels left in an unrefreshed buffer.
+#define OF_WOLF_VIDEO_BUFFERS 3
 static void OF_WolfReturnToGameFrame()
 {
+	// The Pocket has no clean process exit (the player leaves via the hardware
+	// menu / power), so the atexit-style WriteConfig() in
+	// CallTerminateFunctions() never runs and settings would never persist.
+	// The control panel just closed, so flush the config now; WriteConfig()
+	// no-ops unless a setting actually changed.  ecwolf.cfg is a writeback data
+	// slot (same parameters as the save slots), so the host commits it to card.
+	WriteConfig();
+
 	if(startgame || loadedgame)
 		return;
 
 	if(viewsize != 21)
 	{
-		VH_AcquireDeferredScreenLock();
-		DrawPlayScreen();
+		// The control panel was drawn full-screen.  The GPU cycles through
+		// several video buffers, and one DrawPlayScreen only refreshes the one
+		// it is presented into -- the others keep stale (red) menu pixels in the
+		// shrunk view's border/HUD.  Repaint and present the background into each
+		// buffer so none retain the old menu; the last repaint is left for
+		// PlayFrame to present together with the freshly rendered view.
+		for(int i = 0; i < OF_WOLF_VIDEO_BUFFERS; ++i)
+		{
+			VH_AcquireDeferredScreenLock();
+			DrawPlayScreen();
+			if(i < OF_WOLF_VIDEO_BUFFERS - 1)
+				VH_UpdateScreen(false);
+		}
 	}
 	else
 		OF_WolfGPU_SetNextVideoFramePreserve(false);

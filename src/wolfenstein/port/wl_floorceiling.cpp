@@ -269,13 +269,13 @@ static bool R_DrawTexturedBackdropHalfGPU(byte *vbuf, unsigned vbufPitch,
 	const int shade = LIGHT2SHADE(gLevelLight + r_extralight);
 	const fixed planeVis = FixedDiv(r_depthvisibility, abs(planeheight));
 
-	for(int y = yStart; y < yEnd; ++y)
-	{
-		const int rowDistance = floor ? y - horizon + 1 : horizon - y;
-		if(rowDistance <= 0)
-			continue;
-
-		const fixed dist = (planenumerator / rowDistance) << 8;
+	// Per-row affine span coordinates, exactly as fed to DrawSpan below:
+	// s = -gv>>2, sstep = -dv>>2, t = gu>>2, tstep = du>>2, plus the depth shade.
+	struct RowParams { int rowDist, sfrac, sstep, tfrac, tstep, shadeIndex; };
+	auto computeRow = [&](int y) -> RowParams {
+		RowParams r;
+		r.rowDist = floor ? y - horizon + 1 : horizon - y;
+		const fixed dist = (planenumerator / r.rowDist) << 8;
 		fixed gu = viewxFrac + FixedMul(dist, viewcos);
 		fixed gv = -viewyFrac + FixedMul(dist, viewsin);
 		const fixed texStep = dist / scale;
@@ -283,12 +283,89 @@ static bool R_DrawTexturedBackdropHalfGPU(byte *vbuf, unsigned vbufPitch,
 		const fixed dv = -FixedMul(texStep, viewcos);
 		gu -= (viewwidth >> 1) * du;
 		gv -= (viewwidth >> 1) * dv;
+		r.sfrac = -gv >> 2;
+		r.sstep = -dv >> 2;
+		r.tfrac = gu >> 2;
+		r.tstep = du >> 2;
+		const int tz = FixedMul(planeVis, r.rowDist << FRACBITS);
+		r.shadeIndex = GETPALOOKUP(tz, shade);
+		return r;
+	};
 
-		const int tz = FixedMul(planeVis, rowDistance << FRACBITS);
-		const int shadeIndex = GETPALOOKUP(tz, shade);
+	// Fast path: ship the whole half as one perspective param-span plane.
+	// A floor/ceiling is a single plane, so szi=texel*zi, tzi, and zi=rowDistance
+	// are each linear in screen (x,y).  With zi = rowDistance the GPU's szi/zi
+	// divide reproduces the affine path's per-pixel texel exactly, so the image
+	// matches while N affine spans collapse into one command.  Worth the 31-word
+	// header only once the half is several rows tall.
+	static const int kMinPerspRows = 8;
+	if(OF_WolfGPU_HasTexturedPlane())
+	{
+		int r0 = yStart;
+		while(r0 < yEnd && (floor ? r0 - horizon + 1 : horizon - r0) <= 0)
+			++r0;
+		int rLast = yEnd - 1;
+		while(rLast >= yStart &&
+			(floor ? rLast - horizon + 1 : horizon - rLast) <= 0)
+			--rLast;
+
+		const int rows = rLast - r0 + 1;
+		if(rows >= kMinPerspRows)
+		{
+			const RowParams a = computeRow(r0);
+			const RowParams b = computeRow(r0 + 1);
+			const RowParams z = computeRow(rLast);
+
+			// zi = rowDistance (Q16.16), so szi/tzi reduce to texel*rowDistance
+			// (the (texel_q16 * zi_q16) >> 16 the GPU expects, zi_q16=rowDist<<16).
+			const int64_t sziO = (int64_t)a.sfrac * a.rowDist;
+			const int64_t tziO = (int64_t)a.tfrac * a.rowDist;
+			const int64_t sziDu = (int64_t)a.sstep * a.rowDist;   // const across rows
+			const int64_t tziDu = (int64_t)a.tstep * a.rowDist;
+			const int64_t sziDv = (int64_t)b.sfrac * b.rowDist - sziO;
+			const int64_t tziDv = (int64_t)b.tfrac * b.rowDist - tziO;
+
+			const int32_t lightDv = (int32_t)
+				(((int64_t)(z.shadeIndex - a.shadeIndex) << 16) / (rows - 1));
+
+			// Reject if any plane coefficient overflows int32 (it should not for
+			// 64x64 tiles); the per-row affine path below stays the fallback.
+			if(sziO == (int32_t)sziO && tziO == (int32_t)tziO &&
+				sziDu == (int32_t)sziDu && tziDu == (int32_t)tziDu &&
+				sziDv == (int32_t)sziDv && tziDv == (int32_t)tziDv)
+			{
+				OFWolfTexturedPlane plane;
+				plane.szi_origin = (int32_t)sziO;
+				plane.szi_du = (int32_t)sziDu;
+				plane.szi_dv = (int32_t)sziDv;
+				plane.tzi_origin = (int32_t)tziO;
+				plane.tzi_du = (int32_t)tziDu;
+				plane.tzi_dv = (int32_t)tziDv;
+				plane.zi_origin = a.rowDist << 16;
+				plane.zi_du = 0;
+				plane.zi_dv = (b.rowDist - a.rowDist) << 16;  // (floor?+1:-1)<<16
+				plane.light_origin = (a.shadeIndex & 0x3F) << 16;
+				plane.light_du = 0;
+				plane.light_dv = lightDv;
+
+				if(OF_WolfGPU_DrawTexturedPlane(vbuf + r0 * (int)vbufPitch,
+					(int)vbufPitch, rows, viewwidth, tex, 64, 64, &plane))
+				{
+					return true;
+				}
+			}
+		}
+	}
+
+	for(int y = yStart; y < yEnd; ++y)
+	{
+		const RowParams r = computeRow(y);
+		if(r.rowDist <= 0)
+			continue;
+
 		if(!OF_WolfGPU_DrawSpan(vbuf + y * (int)vbufPitch, viewwidth,
-			tex, 64, 64, -gv >> 2, gu >> 2, -dv >> 2, du >> 2,
-			shadeIndex))
+			tex, 64, 64, r.sfrac, r.tfrac, r.sstep, r.tstep,
+			r.shadeIndex))
 		{
 			return false;
 		}
