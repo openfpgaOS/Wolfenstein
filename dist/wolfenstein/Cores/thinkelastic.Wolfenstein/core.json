@@ -29,7 +29,7 @@
             {
                 "name": "default",
                 "id": 0,
-                "filename": "bitstream.rbf_r",
+                "filename": "os25.rbf_r",
                 "chip32_vm": "loader.bin"
             }
         ]

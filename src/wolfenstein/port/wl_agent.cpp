@@ -1059,7 +1059,16 @@ void APlayerPawn::Cmd_Use()
 	}
 
 	if(doNothing)
-		PlaySoundLocActor("misc/do_nothing", this);
+	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		// Use now fires every tic while held so the player can sweep along walls
+		// hunting for secret pushwalls.  Only play the "nothing happened" grunt
+		// on the initial press; otherwise it machine-guns every tic on any blank
+		// wall (and each SFX plays on its own hardware voice, so they stack).
+		if(!control[player->GetPlayerNum()].buttonheld[bt_use])
+#endif
+			PlaySoundLocActor("misc/do_nothing", this);
+	}
 	else
 		P_ChangeSwitchTexture(spot, static_cast<MapTile::Side>(direction), isRepeatable, lastTrigger);
 }

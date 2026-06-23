@@ -347,13 +347,12 @@ void APlayerPawn::Tick()
 
 	TicCmd_t &cmd = control[player->GetPlayerNum()];
 
-	if(cmd.buttonstate[bt_use]
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-		// One Use per press: vanilla Wolf3D gated on the edge too, and a
-		// level trigger replays "do nothing" every tic while held.
-		&& !cmd.buttonheld[bt_use]
-#endif
-	)
+	// Fire Use every tic the button is held (vanilla Wolf3D / upstream ECWolf
+	// behaviour) so the player can hold Use and walk along walls to find secret
+	// pushwalls.  Doors/exits/repeatable triggers self-debounce on
+	// buttonheld[bt_use], and Cmd_Use only plays the "nothing happened" grunt on
+	// the rising edge, so holding Use no longer machine-guns that sound.
+	if(cmd.buttonstate[bt_use])
 		Cmd_Use();
 
 	if((player->flags & (player_t::PF_WEAPONREADY|player_t::PF_WEAPONREADYALT)))

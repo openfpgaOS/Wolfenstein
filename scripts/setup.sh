@@ -204,15 +204,15 @@ fi
 
 # ── Check runtime files ─────────────────────────────────────────────
 SDK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RUNTIME="$SDK_ROOT/runtime"
+RUNTIME="$SDK_ROOT/runtime/pocket"
 
 echo
 MISSING=0
-for f in bitstream.rbf_r os.bin loader.bin; do
+for f in os25.rbf_r os.bin loader.bin; do
     if [[ -f "$RUNTIME/$f" ]]; then
         ok "$f ($(wc -c < "$RUNTIME/$f" | tr -d ' ') bytes)"
     else
-        fail "$f not found in runtime/"
+        fail "$f not found in runtime/pocket/"
         MISSING=1
     fi
 done

@@ -717,9 +717,17 @@ bool GameLoop (void)
 {
 	bool died;
 	bool dointermission;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	bool reloadedGame;
+#endif
 
 restartgame:
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// Remember whether this round restarts into a freshly loaded game before the
+	// flag is cleared below: a load restarts through here with the just-closed
+	// full-screen control panel still sitting in the other GPU video buffers,
+	// which a single DrawPlayScreen cannot clean (see the repaint below).
+	reloadedGame = loadedgame;
 	OF_WolfGPU_SetNextVideoFramePreserve(false);
 #endif
 	VW_FadeOut();
@@ -823,6 +831,19 @@ restartgame:
 		}
 
 		StatusBar->DrawStatusBar();
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		// A game loaded from the in-game control panel restarts through here
+		// while the just-closed full-screen menu still occupies the other GPU
+		// video buffers.  DrawPlayScreen() and the per-tic status-bar redraw
+		// each only land in one buffer, so without this the status bar/border
+		// keep menu pixels in the not-yet-refreshed buffers -- the reported
+		// symptom (loading a save mid-game corrupts the status bar; loading
+		// after ending the game does not).  Repaint into every buffer, as the
+		// control-panel resume path does.
+		if(reloadedGame && viewsize != 21)
+			OF_WolfRepaintPlayScreenAllBuffers();
+#endif
 
 		dointermission = true;
 

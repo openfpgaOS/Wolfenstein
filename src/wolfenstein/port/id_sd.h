@@ -150,7 +150,10 @@ enum SoundChannel
 {
 	SD_GENERIC = -1,
 	SD_WEAPONS,
-	SD_BOSSWEAPONS
+	SD_BOSSWEAPONS,
+	// Dedicated channel for item pickups so a new pickup cuts off the previous
+	// one (as in vanilla Wolf3D) instead of stacking on a fresh hardware voice.
+	SD_ITEMPICKUP
 };
 
 // Function prototypes

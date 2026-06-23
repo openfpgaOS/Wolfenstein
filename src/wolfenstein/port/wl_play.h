@@ -75,6 +75,14 @@ extern  memptr      demobuffer;
 void    PlayFrame();
 void    PlayLoop (void);
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+// Repaint the play-screen background (border + status bar) into every GPU video
+// buffer so none retain stale pixels (e.g. a full-screen control panel) in the
+// border/HUD.  Used when resuming from the control panel and when restarting
+// into a freshly loaded game (see GameLoop).
+void    OF_WolfRepaintPlayScreenAllBuffers();
+#endif
+
 void    InitRedShifts (void);
 void    FinishPaletteShifts (void);
 

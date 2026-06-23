@@ -709,42 +709,18 @@ void PollControls (bool absolutes)
 		PollJoystickButtons ();
 
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	// B button: hold = run, tap = use/open on release (matching the Doom
-	// port).  B arrives as both the synthesized Space key and controller
-	// button 1; both bindings' direct Use contribution is swallowed here
-	// and replaced by the tap-on-release, so walking along a wall holding
-	// B never grinds the "do nothing" sound.
+	// B doubles as Use and Run -- there aren't enough Pocket buttons to give Run
+	// its own (strafe and the shoulder weapon-switches take the rest), so holding
+	// B runs.  Crucially it ALSO issues Use every tic while held, so the player
+	// can hold B and run along walls to find secret pushwalls.  The "do nothing"
+	// grunt is edge-gated in Cmd_Use() so sweeping blank walls stays silent, and
+	// doors/exits and other one-shot triggers self-debounce on buttonheld[bt_use]
+	// -- so one press still opens exactly one door.  (B reaches us as both the
+	// synthesized Space key and controller button 1.)
+	if(Keyboard[sc_Space] || (IN_JoyButtons() & 2))
 	{
-		TicCmd_t &bcmd = control[ConsolePlayer];
-		static bool bWasHeld = false;
-		static int32_t bPressTics = 0;
-		static int bUseTapFrames = 0;
-
-		const bool bHeld = Keyboard[sc_Space] || (IN_JoyButtons() & 2);
-
-		if(bHeld)
-		{
-			// Suppress B's own Use binding; L2 (PageDown) still uses.
-			if(!Keyboard[sc_PgDn])
-				bcmd.buttonstate[bt_use] = false;
-			bcmd.buttonstate[bt_run] = true;
-			if(!bWasHeld)
-				bPressTics = GetTimeCount();
-		}
-		else if(bWasHeld)
-		{
-			// Released: a tap (< 500 ms = 35 tics) becomes a Use press for
-			// a couple of frames so the 70 Hz game logic can't miss it.
-			if((uint32_t)(GetTimeCount() - bPressTics) < 35)
-				bUseTapFrames = 2;
-		}
-		bWasHeld = bHeld;
-
-		if(bUseTapFrames > 0)
-		{
-			bUseTapFrames--;
-			bcmd.buttonstate[bt_use] = true;
-		}
+		control[ConsolePlayer].buttonstate[bt_run] = true;
+		control[ConsolePlayer].buttonstate[bt_use] = true;
 	}
 #endif
 
@@ -871,6 +847,24 @@ void BumpGamma()
 // framebuffer); the play-screen background must be repainted into each so a
 // shrunk view never shows stale menu pixels left in an unrefreshed buffer.
 #define OF_WOLF_VIDEO_BUFFERS 3
+
+// The control panel is drawn full-screen.  The GPU cycles through several video
+// buffers, and one DrawPlayScreen only refreshes the one it is presented into --
+// the others keep stale (red) menu pixels in the shrunk view's border/HUD.
+// Repaint and present the background into each buffer so none retain the old
+// menu; the last repaint is left for the caller's PlayFrame to present together
+// with the freshly rendered view.
+void OF_WolfRepaintPlayScreenAllBuffers()
+{
+	for(int i = 0; i < OF_WOLF_VIDEO_BUFFERS; ++i)
+	{
+		VH_AcquireDeferredScreenLock();
+		DrawPlayScreen();
+		if(i < OF_WOLF_VIDEO_BUFFERS - 1)
+			VH_UpdateScreen(false);
+	}
+}
+
 static void OF_WolfReturnToGameFrame()
 {
 	// The Pocket has no clean process exit (the player leaves via the hardware
@@ -885,21 +879,7 @@ static void OF_WolfReturnToGameFrame()
 		return;
 
 	if(viewsize != 21)
-	{
-		// The control panel was drawn full-screen.  The GPU cycles through
-		// several video buffers, and one DrawPlayScreen only refreshes the one
-		// it is presented into -- the others keep stale (red) menu pixels in the
-		// shrunk view's border/HUD.  Repaint and present the background into each
-		// buffer so none retain the old menu; the last repaint is left for
-		// PlayFrame to present together with the freshly rendered view.
-		for(int i = 0; i < OF_WOLF_VIDEO_BUFFERS; ++i)
-		{
-			VH_AcquireDeferredScreenLock();
-			DrawPlayScreen();
-			if(i < OF_WOLF_VIDEO_BUFFERS - 1)
-				VH_UpdateScreen(false);
-		}
-	}
+		OF_WolfRepaintPlayScreenAllBuffers();
 	else
 		OF_WolfGPU_SetNextVideoFramePreserve(false);
 
@@ -992,6 +972,18 @@ void CheckKeys (void)
 		// button cannot re-trigger the menu until it is released.
 		control[ConsolePlayer].buttonstate[bt_esc] = true;
 
+		// A loaded game must restart through GameLoop -- that restart is what
+		// clears loadedgame, restarts the level music and repaints every video
+		// buffer.  It is driven by ex_abort, so set it here BEFORE the screenfaded
+		// branch.  On the Pocket the control panel's MenuFadeIn() clears
+		// screenfaded before US_ControlPanel returns, so gating the abort on
+		// screenfaded (as upstream does) means it never fires for an in-game load:
+		// loadedgame stays stuck true and PlayFrame's `if(!loadedgame)` HUD guard
+		// then suppresses the status bar for the rest of the game (the reported
+		// "status bar disappears and never updates" after new-game-then-load).
+		if (loadedgame)
+			playstate = ex_abort;
+
 		if(screenfaded)
 		{
 			if (!startgame && !loadedgame)
@@ -1001,8 +993,6 @@ void CheckKeys (void)
 				if(viewsize != 21)
 					DrawPlayScreen ();
 			}
-			if (loadedgame)
-				playstate = ex_abort;
 			if (MousePresent && IN_IsInputGrabbed())
 				IN_CenterMouse();     // Clear accumulated mouse movement
 
@@ -1018,7 +1008,10 @@ void CheckKeys (void)
 		}
 		else
 		{
-			ContinueMusic (lastoffs);
+			// Don't resume the old level's music when we're about to restart into
+			// a new/loaded game; GameLoop's StartMusic handles that.
+			if (!startgame && !loadedgame)
+				ContinueMusic (lastoffs);
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 			if(!startgame && !loadedgame)
 				OF_WolfReturnToGameFrame();

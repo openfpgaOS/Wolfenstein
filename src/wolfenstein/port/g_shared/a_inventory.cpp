@@ -234,7 +234,9 @@ void AInventory::Touch(AActor *toucher)
 	if(flags & FL_COUNTSECRET)
 		++gamestate.secretcount;
 
-	PlaySoundLocActor(pickupsound, toucher);
+	// Play on the dedicated pickup channel so grabbing items in quick succession
+	// replaces the previous pickup sound instead of layering several at once.
+	PlaySoundLocActor(pickupsound, toucher, SD_ITEMPICKUP);
 	if(toucher->player == &players[ConsolePlayer])
 		StartBonusFlash();
 }

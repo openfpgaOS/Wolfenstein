@@ -1121,7 +1121,20 @@ static void DemoLoop()
 			if (Keyboard[sc_Tab])
 				RecordDemo ();
 			else
+			{
 				US_ControlPanel (0);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+				// The Pocket has no clean process exit (the player leaves via the
+				// hardware menu / power), so the atexit-style WriteConfig() in
+				// CallTerminateFunctions() never runs.  The in-game control panel
+				// flushes on close via OF_WolfReturnToGameFrame(), but options
+				// changed here in the main-menu control panel (controls, display
+				// size, automap, ...) had no flush path and were lost on quit.
+				// WriteConfig() no-ops unless a setting actually changed, and
+				// ecwolf.cfg is a writeback data slot the host commits to card.
+				WriteConfig();
+#endif
+			}
 		}
 
 		if (param_tedlevel || startgame || loadedgame)

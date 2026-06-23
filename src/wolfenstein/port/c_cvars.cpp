@@ -248,11 +248,11 @@ void ReadConfig(void)
 			controlScheme[i].keyboard = SDL2Convert(config.GetSetting(keySettingName)->GetInteger());
 		controlScheme[i].mouse = config.GetSetting(mseSettingName)->GetInteger();
 	}
+	// Use the saved view size as-is.  (This used to be force-overwritten to 21
+	// on openfpga every boot -- and written back into the setting -- which meant
+	// the player's chosen screen size never persisted; 21 stays the first-run
+	// default via CreateSetting("ViewSize", 21) above.)
 	viewsize = config.GetSetting("ViewSize")->GetInteger();
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	viewsize = 21;
-	config.GetSetting("ViewSize")->SetValue(viewsize);
-#endif
 	mousexadjustment = config.GetSetting("MouseXAdjustment")->GetInteger();
 	mouseyadjustment = config.GetSetting("MouseYAdjustment")->GetInteger();
 	panxadjustment = config.GetSetting("PanXAdjustment")->GetInteger();

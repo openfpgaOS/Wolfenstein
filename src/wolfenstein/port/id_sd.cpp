@@ -1180,6 +1180,12 @@ static int SD_PlayDigitized(const SoundData &which,int leftpos,int rightpos,Soun
 		return 0;
 
 	Mix_Volume(channel, MIX_VOLUME_128(SoundVolume));
+	// The openfpga Mix_PlayChannel shim allocates a fresh hardware voice per call
+	// and never halts the channel's previous voice, so a "reserved" channel still
+	// stacks sounds.  Explicitly stop the pickup channel first so a new pickup
+	// cuts off the previous one (vanilla Wolf3D behaviour) instead of overlapping.
+	if(chan == SD_ITEMPICKUP)
+		Mix_HaltChannel(channel);
 	if(Mix_PlayChannel(channel, sample, 0) == -1)
 	{
 		printf("Unable to play sound: %s\n", Mix_GetError());
@@ -1575,8 +1581,8 @@ SDL_StartSB()
 		printf("S_Init: Failed to build stereo audio conversion: %s\n", SDL_GetError());
 	}
 
-	Mix_ReserveChannels(2);  // reserve player and boss weapon channels
-	Mix_GroupChannels(2, MIX_CHANNELS-1, 1); // group remaining channels
+	Mix_ReserveChannels(3);  // reserve player weapon, boss weapon and item-pickup channels
+	Mix_GroupChannels(3, MIX_CHANNELS-1, 1); // group remaining channels
 
 #ifndef OF_ECWOLF_OPENFPGA
 	// Init music
@@ -2100,7 +2106,14 @@ SD_StartMusic(const char* chunk)
 		if (Mix_PlayMusic(music, -1) == -1)
 			printf("Unable to play music file: %s\n", Mix_GetError());
 		else
+		{
 			OpenFPGAMusicChunk = chunk;
+			// Mix_PlayMusic starts at the mixer's default music volume, so the
+			// user's MusicVolume (set via the menu slider) is lost every time a
+			// track (re)starts -- e.g. when closing the control panel back into
+			// the game.  Reapply it now so the chosen volume sticks in-game.
+			SD_UpdateMusicVolume(0);
+		}
 		SDL_UnlockMutex(audioMutex);
 	}
 	else

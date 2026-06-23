@@ -13,14 +13,16 @@
 #
 
 APP       = wolfenstein
-TARGET    = pocket
+TARGET   ?= pocket
+MISTER_IP ?= mister.local
 SDK_DIR   = ../sdk
 ROOT      = $(realpath $(CURDIR)/../..)
 OBJ_DIR   = $(ROOT)/.obj/$(APP)
 BUILD_DIR = $(OBJ_DIR)
 DIST      = $(ROOT)/dist/$(APP)
-OUT       = $(ROOT)/build/$(APP)
+OUT       = $(ROOT)/build/$(TARGET)/$(APP)
 RUNTIME   = $(ROOT)/runtime
+GAME_ASSETS = $(wildcard *.wl1 *.WL1 *.wl6 *.WL6 *.sod *.SOD *.sdm *.SDM *.sd2 *.SD2 *.sd3 *.SD3 *.n3d *.N3D *.pk3 *.PK3 *.ecwolf *.ECWOLF *.zip *.ZIP *.cue *.CUE *.bin *.BIN)
 
 ECWOLF_SRC_DIR = port
 WADSRC_STATIC_DIR = wadsrc/static
@@ -138,25 +140,15 @@ all: $(OBJ_DIR)/app.elf release
 	@$(SIZE) $<
 
 release: $(OBJ_DIR)/app.elf
-	@rm -rf $(OUT)
-	@mkdir -p $(dir $(OUT))
-	@cp -r $(DIST) $(OUT)
-	@cp $(RUNTIME)/bitstream.rbf_r $(RUNTIME)/loader.bin $$(ls -d $(OUT)/Cores/*/)/
-	@mkdir -p $$(ls -d $(OUT)/Assets/*/)/common
-	@cp $(RUNTIME)/os.bin $$(ls -d $(OUT)/Assets/*/)/common/
-	@cp $(RUNTIME)/bank.ofsf $$(ls -d $(OUT)/Assets/*/)/common/ 2>/dev/null || true
-	@common=$$(ls -d $(OUT)/Assets/*/)/common; \
-		$(STRIP) -o $$common/$(APP).elf $<
-	@for f in *.wl1 *.WL1 *.wl6 *.WL6 *.sod *.SOD *.sdm *.SDM *.sd2 *.SD2 *.sd3 *.SD3 *.n3d *.N3D *.pk3 *.PK3 *.ecwolf *.ECWOLF *.zip *.ZIP *.cue *.CUE *.bin *.BIN; do [ -f "$$f" ] && cp "$$f" $$(ls -d $(OUT)/Assets/*/)/common/; done 2>/dev/null; true
-	@echo "Ready: build/$(APP)/"
+	@$(SDK_DIR)/platforms/$(TARGET)/image.sh "$(APP)" "$(OBJ_DIR)/app.elf" "$(ROOT)" "$(DIST)" $(GAME_ASSETS)
 
 COMMON = $(shell ls -d $(OUT)/Assets/*/common 2>/dev/null)
 
 debug: all
-	@$(ROOT)/scripts/debug.sh $$(ls -d $(OUT)/Assets/*/common)/$(APP).elf
+	@$(ROOT)/scripts/debug.sh "$$(ls -d $(OUT)/Assets/*/common 2>/dev/null)/$(APP).elf"
 
 copy: all
-	@$(SDK_DIR)/platforms/$(TARGET)/copy.sh "$(APP)" "$$(ls -d $(OUT)/Assets/*/common)/$(APP).elf"
+	@MISTER_IP="$(MISTER_IP)" $(SDK_DIR)/platforms/$(TARGET)/copy.sh "$(APP)" "$(OBJ_DIR)/app.elf"
 
 package: all
 	@$(ROOT)/scripts/package.sh $(APP)
