@@ -96,6 +96,7 @@ public:
 	}
 
 	void DrawStatusBar();
+	unsigned int GetDrawSignature();
 	unsigned int GetHeight(bool top) { return top ? 0 : STATUSLINES+!mac; }
 	void NewGame() { facecount = 0; }
 	void RefreshBackground(bool noborder);
@@ -546,6 +547,34 @@ void WolfStatusBar::DrawStatusBar()
 	DrawWeapon ();
 	DrawScore ();
 	DrawItems ();
+}
+
+// Hash of everything DrawStatusBar renders, so the caller can skip the costly
+// full 2D re-blit when nothing visible changed (the bar is preserved across
+// frames otherwise).  Covers the value latches, the face animation frame, the
+// ready weapon, and the whole inventory (keys/treasure/ammo pools).
+unsigned int WolfStatusBar::GetDrawSignature()
+{
+	player_t &plyr = players[ConsolePlayer];
+	unsigned int h = 2166136261u;
+#define SBHASH(v) do { h = (h ^ (unsigned int)(v)) * 16777619u; } while(0)
+	SBHASH(plyr.health);
+	SBHASH(plyr.lives);
+	SBHASH((unsigned int)plyr.score);
+	SBHASH((unsigned int)plyr.frags);
+	SBHASH((unsigned int)gamestate.faceframe.GetIndex());
+	SBHASH((unsigned int)(size_t)plyr.ReadyWeapon);
+	if(plyr.mo != NULL)
+	{
+		for(AInventory *item = plyr.mo->inventory; item != NULL;
+			item = item->inventory)
+		{
+			SBHASH((unsigned int)(size_t)item->GetClass());
+			SBHASH(item->amount);
+		}
+	}
+#undef SBHASH
+	return h;
 }
 
 //===========================================================================

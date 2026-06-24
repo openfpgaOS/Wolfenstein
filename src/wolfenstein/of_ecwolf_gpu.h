@@ -84,7 +84,7 @@ bool OF_WolfGPU_AcquireVideoFrame(uint8_t **framebuffer, int *pitch,
 	int width, int height);
 void OF_WolfGPU_SetNextVideoFramePreserve(bool preserve);
 void OF_WolfGPU_SetNextVideoFramePreserveExcludeRows(int y0, int y1);
-bool OF_WolfGPU_USSinceDisplaySync(uint32_t *us_out);
+bool OF_WolfGPU_PresentPace(uint32_t *period_us, uint32_t *elapsed_refreshes);
 bool OF_WolfGPU_FlipVideoBuffer(int idx, uint32_t *token);
 bool OF_WolfGPU_PresentVideoFrame(void);
 void OF_WolfGPU_ResetVideoFrames(void);
@@ -95,6 +95,9 @@ void OF_WolfGPU_PrepareForCPUAccessRect(uint8_t *dest, int width, int height,
 	int pitch);
 void OF_WolfGPU_PrepareForCPUAccessColumn(uint8_t *dest, int count, int pitch);
 bool OF_WolfGPU_IsActive(void);
+bool OF_WolfGPU_ActiveFrame(uint8_t **fb_out, int *pitch_out, int *height_out);
+bool OF_WolfGPU_MarkCPURectDisjoint(uint8_t *dest, int width, int height,
+	int pitch);
 bool OF_WolfGPU_DrawColumn(uint8_t *dest, int count, const uint8_t *source,
 	int source_len, int texfrac, int texstep, int light);
 bool OF_WolfGPU_DrawMaskedColumn(uint8_t *dest, int count,
@@ -122,7 +125,7 @@ static inline bool OF_WolfGPU_AcquireVideoFrame(uint8_t **, int *,
 	int, int) { return false; }
 static inline void OF_WolfGPU_SetNextVideoFramePreserve(bool) {}
 static inline void OF_WolfGPU_SetNextVideoFramePreserveExcludeRows(int, int) {}
-static inline bool OF_WolfGPU_USSinceDisplaySync(uint32_t *) { return false; }
+static inline bool OF_WolfGPU_PresentPace(uint32_t *, uint32_t *) { return false; }
 static inline bool OF_WolfGPU_FlipVideoBuffer(int, uint32_t *) { return false; }
 static inline bool OF_WolfGPU_PresentVideoFrame(void) { return false; }
 static inline void OF_WolfGPU_ResetVideoFrames(void) {}
@@ -132,6 +135,8 @@ static inline void OF_WolfGPU_FallbackToCPU(void) {}
 static inline void OF_WolfGPU_PrepareForCPUAccessRect(uint8_t *, int, int, int) {}
 static inline void OF_WolfGPU_PrepareForCPUAccessColumn(uint8_t *, int, int) {}
 static inline bool OF_WolfGPU_IsActive(void) { return false; }
+static inline bool OF_WolfGPU_ActiveFrame(uint8_t **, int *, int *) { return false; }
+static inline bool OF_WolfGPU_MarkCPURectDisjoint(uint8_t *, int, int, int) { return false; }
 static inline bool OF_WolfGPU_DrawColumn(uint8_t *, int, const uint8_t *,
 	int, int, int, int) { return false; }
 static inline bool OF_WolfGPU_DrawMaskedColumn(uint8_t *, int,

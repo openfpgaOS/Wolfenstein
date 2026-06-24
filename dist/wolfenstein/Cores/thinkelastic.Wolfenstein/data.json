@@ -97,7 +97,7 @@
                 "required": false,
                 "parameters": "0x84",
                 "nonvolatile": true,
-                "address": "0x20380000",
+                "address": "0x200C0000",
                 "size_maximum": "0x40000",
                 "extensions": [
                     "cfg",

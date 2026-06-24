@@ -63,13 +63,55 @@ static uint32_t gpu_dbg_rejects;
 static uint32_t gpu_dbg_fence_late;
 static uint32_t gpu_dbg_forced_swaps;
 
-/* Timestamp (of_time_us) of the last acquire that actually blocked on the
- * display flip fence.  The flip fence retires when the display consumes the
- * previous swap, so this is in effect the last vsync as seen by the app --
- * the render interpolation re-anchors its time sample on it to keep motion
- * sampling locked to the display clock instead of "now". */
-static uint32_t gpu_video_pace_us;
-static bool gpu_video_pace_valid;
+/* True once a GPU page-flip has been queued and is awaiting its vsync.  The
+ * in-game present blocks on the PREVIOUS flip's vsync before queueing the next
+ * one (render-one-frame-ahead), so exactly one flip is outstanding at a time
+ * and exactly one frame is presented per refresh -- the display pacing the loop
+ * otherwise lacked.  See OF_WolfGPU_PresentVideoFrame. */
+static bool gpu_video_flip_queued;
+
+/* Present pacing for render interpolation: the wall-clock interval between
+ * consecutive vsync-blocked presents (smoothed -> period) and how many display
+ * refreshes the last interval spanned.  Lets the interpolation advance by the
+ * ACTUAL displayed time per frame -- smooth at a steady cadence, correctly
+ * stepped when a frame spans two refreshes (e.g. the status-bar path's per-frame
+ * of_gpu_finish serialization) -- instead of assuming a fixed one-refresh step. */
+static uint32_t gpu_present_us;
+static uint32_t gpu_present_period_us;
+static uint32_t gpu_present_elapsed;
+static bool gpu_present_valid;
+
+static void gpu_record_present_pace(void)
+{
+	const uint32_t now = of_time_us();
+	if(gpu_present_valid)
+	{
+		const uint32_t interval = now - gpu_present_us;
+		if(gpu_present_period_us == 0)
+		{
+			if(interval >= 6000u && interval <= 25000u)
+				gpu_present_period_us = interval;
+			gpu_present_elapsed = 1u;
+		}
+		else
+		{
+			/* Round the interval to a whole number of refreshes (1 normally,
+			 * 2 on a dropped/serialized frame); clamp so a stray non-blocking
+			 * wait can't poison the period or the phase step. */
+			uint32_t e = (interval + gpu_present_period_us / 2u) /
+				gpu_present_period_us;
+			if(e < 1u) e = 1u;
+			else if(e > 4u) e = 4u;
+			gpu_present_elapsed = e;
+			const uint32_t per = interval / e;
+			if(per >= 6000u && per <= 25000u)
+				gpu_present_period_us =
+					(gpu_present_period_us * 7u + per + 4u) / 8u;
+		}
+	}
+	gpu_present_us = now;
+	gpu_present_valid = true;
+}
 
 static of_gpu_affine_span_group_t gpu_batch;
 static int gpu_batch_count;
@@ -119,6 +161,12 @@ static uint8_t *gpu_track_base;
 static uint32_t gpu_track_bytes;
 static int gpu_track_pitch;
 static bool gpu_cpu_dirty;
+/* Set when every CPU-dirty region this frame is KNOWN disjoint from the GPU's
+ * rendered region (the status bar below the 3D view).  When true the present
+ * skips its of_gpu_finish: the GPU's own writes are drained by CMD_FLIP before
+ * scanout, and the disjoint CPU lines cannot race them -- so render-ahead is
+ * preserved.  Cleared whenever any overlapping CPU fallback dirties the frame. */
+static bool gpu_cpu_dirty_disjoint;
 static uint32_t gpu_cpu_dirty_lines[GPU_FB_TRACK_WORDS];
 static uint32_t gpu_cpu_valid_lines[GPU_FB_TRACK_WORDS];
 
@@ -507,6 +555,7 @@ static void gpu_reset_cpu_cache_tracking(void)
 	gpu_clear_line_bits(gpu_cpu_dirty_lines);
 	gpu_clear_line_bits(gpu_cpu_valid_lines);
 	gpu_cpu_dirty = false;
+	gpu_cpu_dirty_disjoint = false;
 }
 
 static unsigned int gpu_track_line_count(void)
@@ -883,12 +932,14 @@ void OF_WolfGPU_ApplyRefreshPolicy(void)
 	of_analogizer_state_t analogizer;
 	const bool analogizerEnabled =
 		of_analogizer_state(&analogizer) == 0 && analogizer.enabled;
-	/* 60 Hz (Doom parity): the display consumes one swap per refresh, so the
-	 * refresh rate is the present cap.  70 Hz tics on a 50 Hz panel meant a
-	 * 1,1,2 tic beat every three frames; at 60 Hz the double-tic frame drops
-	 * to roughly one in six and display latency shrinks. */
+	/* Match the Doom port's refresh policy:
+	 *  - Handheld LCD (no Analogizer): VTOTAL_AUTO -> kernel VRR.  The LCD can
+	 *    vary its refresh, so the OS adapts it to the app's present cadence,
+	 *    which minimizes the 70 Hz-sim / fixed-panel beat and display latency.
+	 *  - Analogizer analog output (CRT/scaler): fixed VTOTAL_60HZ.  Analog sinks
+	 *    need stable, standards-compliant timing, so VRR must be off there. */
 	const uint32_t vtotal = analogizerEnabled ?
-		OF_VIDEO_VTOTAL_AUTO : OF_VIDEO_VTOTAL_60HZ;
+		OF_VIDEO_VTOTAL_60HZ : OF_VIDEO_VTOTAL_AUTO;
 
 	of_video_set_refresh_vtotal(vtotal);
 }
@@ -910,8 +961,11 @@ void OF_WolfGPU_ResetVideoFrames(void)
 	gpu_video_mode_ok_w = 0;
 	gpu_video_mode_ok_h = 0;
 	gpu_video_mode_ok_pitch = 0;
-	gpu_video_pace_us = 0;
-	gpu_video_pace_valid = false;
+	gpu_video_flip_queued = false;
+	gpu_present_us = 0;
+	gpu_present_period_us = 0;
+	gpu_present_elapsed = 0;
+	gpu_present_valid = false;
 	gpu_video_clean_first_begin = false;
 	gpu_track_base = NULL;
 	gpu_track_bytes = 0;
@@ -1008,16 +1062,17 @@ void OF_WolfGPU_SetNextVideoFramePreserveExcludeRows(int y0, int y1)
 	gpu_video_preserve_skip_y1 = y1;
 }
 
-/* Microseconds elapsed since the last buffer acquire blocked on the display
- * flip (~the last vsync).  Returns false if the last acquire didn't block
- * (the game is running slower than the display), in which case the caller
- * should fall back to wall-clock sampling. */
-bool OF_WolfGPU_USSinceDisplaySync(uint32_t *us_out)
+/* Smoothed display refresh period (us) and the number of refreshes the last
+ * present interval spanned.  Drives the render-interpolation phase step; false
+ * until the first inter-present interval has been measured. */
+bool OF_WolfGPU_PresentPace(uint32_t *period_us, uint32_t *elapsed_refreshes)
 {
-	if(!gpu_video_pace_valid)
+	if(!gpu_present_valid || gpu_present_period_us == 0)
 		return false;
-	if(us_out != NULL)
-		*us_out = of_time_us() - gpu_video_pace_us;
+	if(period_us != NULL)
+		*period_us = gpu_present_period_us;
+	if(elapsed_refreshes != NULL)
+		*elapsed_refreshes = gpu_present_elapsed ? gpu_present_elapsed : 1u;
 	return true;
 }
 
@@ -1054,34 +1109,17 @@ static bool gpu_acquire_video_draw_buffer(int width, int height)
 	}
 	else if(gpu_video_acquire_pending)
 	{
-		/* CMD_FLIP only retires once the display consumed the previous swap
-		 * (one swap per refresh -- FIFO, not mailbox), so when the game
-		 * outpaces the display this fence is where the loop blocks.  Wait
-		 * for it HERE with a generous bound: the kernel's own acquire wait
-		 * gives up after ~5 ms and then CPU-forces the swap, which can scan
-		 * out a frame the GPU is still presenting (visible hiccup/tear).
-		 * fence_late counts pacing blocks; forced_swaps should stay zero. */
-		const bool fence_late =
-			!of_gpu_fence_reached(gpu_video_acquire_token);
-		if(fence_late)
-		{
+		/* Display pacing is now enforced by of_video_wait_flip() in
+		 * OF_WolfGPU_PresentVideoFrame (render one frame ahead), so this is no
+		 * longer a pacing point.  The CMD_FLIP fence here retires on QUEUE, not
+		 * on the consuming vsync (triple-buffered), so the old busy-spin on it
+		 * never actually blocked on scanout -- it only burned CPU and risked the
+		 * kernel's ~5 ms force-swap/tear.  Acquire the next draw buffer
+		 * non-blocking; the token still tells the kernel which flip just ran. */
+		if(!of_gpu_fence_reached(gpu_video_acquire_token))
 			gpu_dbg_fence_late++;
-			const uint32_t wait_start = of_time_us();
-			while(!of_gpu_fence_reached(gpu_video_acquire_token) &&
-				(uint32_t)(of_time_us() - wait_start) < 50000u)
-			{
-			}
-			gpu_video_pace_us = of_time_us();
-			gpu_video_pace_valid = true;
-		}
-		else
-		{
-			gpu_video_pace_valid = false;
-		}
 		draw_idx = of_video_acquire_next(gpu_video_acquire_idx,
 			gpu_video_acquire_token);
-		if(fence_late && !of_gpu_fence_reached(gpu_video_acquire_token))
-			gpu_dbg_forced_swaps++;
 		gpu_video_acquire_pending = false;
 		gpu_video_acquire_idx = -1;
 		gpu_video_acquire_token = 0;
@@ -1210,7 +1248,12 @@ bool OF_WolfGPU_PresentVideoFrame(void)
 		 * and stay fully asynchronous. */
 		if(gpu_cpu_dirty)
 		{
-			if(gpu_frame_dirty)
+			/* Skip the drain when the CPU-dirty region is disjoint from GPU
+			 * work (status bar below the 3D view): CMD_FLIP drains the GPU's
+			 * own writes before scanout and the disjoint CPU lines can't race
+			 * them, so the fence wait -- and the render-ahead stall it causes --
+			 * is unnecessary. */
+			if(gpu_frame_dirty && !gpu_cpu_dirty_disjoint)
 			{
 				const uint32_t perfStart = OF_WolfPerf_NowUS();
 				of_gpu_finish();
@@ -1231,8 +1274,27 @@ bool OF_WolfGPU_PresentVideoFrame(void)
 		of_cache_flush_range(gpu_video_draw_fb, gpu_video_frame_bytes);
 	}
 
+	/* Render one frame ahead: block until the PREVIOUS queued flip has actually
+	 * been presented at vsync before queueing this one.  of_gpu_flip_to() is
+	 * non-blocking -- the CMD_FLIP fence retires when the swap is QUEUED for the
+	 * next vsync, not when the display consumes it (triple-buffered) -- so
+	 * without this wait the loop free-runs and the present cadence has no fixed
+	 * relationship to the 60 Hz scanout, which is what makes the interpolation
+	 * look unsmooth.  Blocking here keeps exactly one flip outstanding => exactly
+	 * one frame presented per refresh, matching the smooth sibling Doom port
+	 * (../Doom src/doom/shim/i_video.c: I_WaitForQueuedDisplayFlip).  The current
+	 * frame was already rendered above while the previous flip was on screen, so
+	 * this adds pacing, not latency.  The very first present has nothing queued. */
+	if(gpu_video_flip_queued)
+	{
+		of_video_wait_flip();
+		gpu_video_flip_queued = false;
+		gpu_record_present_pace();
+	}
+
 	uint32_t token = of_gpu_flip_to(gpu_video_draw_idx);
 	of_gpu_kick();
+	gpu_video_flip_queued = true;
 
 	gpu_video_last_fb = gpu_video_draw_fb;
 	gpu_video_acquire_pending = true;
@@ -1402,9 +1464,63 @@ void OF_WolfGPU_PrepareForCPUAccessColumn(uint8_t *dest, int count, int pitch)
 	OF_WolfGPU_PrepareForCPUAccessRect(dest, 1, count, pitch);
 }
 
+/* Sync a CPU-drawn rect that the caller guarantees does NOT overlap any GPU-
+ * rendered region of the active frame (the status bar, below the 3D view).
+ * Unlike PrepareForCPUAccessRect this never blocks on of_gpu_finish: it
+ * invalidates the rect (so a blended CPU read sees the preserved SDRAM pixels)
+ * and marks it dirty for writeback, and -- only when no overlapping CPU
+ * fallback has already dirtied the frame -- flags the present to skip its drain
+ * (CMD_FLIP drains the GPU's disjoint writes before scanout).  Keeps the GPU
+ * frame ACTIVE so the present stays on the async render-ahead path.  Falls back
+ * to a full end-of-frame sync if the rect can't be fine-tracked. */
+bool OF_WolfGPU_MarkCPURectDisjoint(uint8_t *dest, int width, int height,
+	int pitch)
+{
+	if(!gpu_available || !gpu_frame_active)
+		return false;
+	if(width <= 0 || height <= 0 || pitch <= 0)
+		return false;
+
+	gpu_flush_batch();
+
+	const uint8_t *rect_end = dest +
+		(uintptr_t)(height - 1) * (uintptr_t)pitch + (uintptr_t)width;
+	if(gpu_track_base == NULL || pitch != gpu_track_pitch ||
+		dest < gpu_track_base ||
+		rect_end > gpu_track_base + gpu_track_bytes)
+	{
+		OF_WolfGPU_EndFrame();
+		return false;
+	}
+
+	const bool was_clean = !gpu_cpu_dirty;
+	gpu_invalidate_rect_for_cpu(dest, width, height, pitch);
+	gpu_mark_cpu_dirty_rect(dest, width, height, pitch);
+	/* Only safe to skip the present drain if THIS rect is the only CPU-dirty
+	 * region; an earlier overlapping CPU fallback still needs the fence. */
+	gpu_cpu_dirty_disjoint = was_clean;
+	return true;
+}
+
 bool OF_WolfGPU_IsActive(void)
 {
 	return gpu_available && gpu_frame_active;
+}
+
+/* The active GPU video frame's buffer/pitch/height, for callers that need to
+ * CPU-draw a sub-region (e.g. the status bar) into it coherently via
+ * OF_WolfGPU_PrepareForCPUAccessRect without ending the frame. */
+bool OF_WolfGPU_ActiveFrame(uint8_t **fb_out, int *pitch_out, int *height_out)
+{
+	if(!gpu_available || !gpu_frame_active || gpu_framebuffer == NULL)
+		return false;
+	if(fb_out != NULL)
+		*fb_out = gpu_framebuffer;
+	if(pitch_out != NULL)
+		*pitch_out = gpu_pitch;
+	if(height_out != NULL)
+		*height_out = gpu_height;
+	return true;
 }
 
 bool OF_WolfGPU_DrawColumn(uint8_t *dest, int count, const uint8_t *source,

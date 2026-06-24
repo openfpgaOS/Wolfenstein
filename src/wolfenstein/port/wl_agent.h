@@ -44,6 +44,10 @@ public:
 	virtual ~DBaseStatusBar() {}
 
 	virtual void DrawStatusBar()=0;
+	// A hash of everything the status bar currently displays; lets the caller
+	// skip the (expensive) full redraw when nothing it shows has changed.
+	// 0 means "always redraw" (unknown).
+	virtual unsigned int GetDrawSignature() { return 0; }
 	virtual unsigned int GetHeight(bool top)=0;
 	virtual void NewGame() {}
 	virtual void Tick() {}

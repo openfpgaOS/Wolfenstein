@@ -284,6 +284,19 @@ void STACK_ARGS DCanvas::DrawTextureV(FTexture *img, double x, double y, uint32 
 			mode = DoDraw0;
 		}
 
+		// Fast unscaled-opaque blit: when this draw is vertically 1:1, uses the
+		// identity colormap, and the plain opaque column drawer (no blend /
+		// translation / fill / overlay), swap in R_DrawColumnFast -- which skips
+		// the per-pixel colormap lookup and fixed-point texture stepping -- and
+		// force one-column-at-a-time so it is actually used.  This is the hot
+		// HUD/2D case (the ~5ms status-bar blit, fonts, fullscreen pics).
+		if (colfunc == basecolfunc && dc_colormap == identitymap &&
+			dc_iscale == FRACUNIT && !sprflipvert)
+		{
+			colfunc = R_DrawColumnFast;
+			mode = DoDraw0;
+		}
+
 		dc_x = int(x0);
 		int x2_i = int(x2);
 		fixed_t xiscale_i = FLOAT2FIXED(xiscale);

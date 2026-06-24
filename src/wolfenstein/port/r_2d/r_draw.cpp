@@ -187,6 +187,28 @@ void R_DrawColumnP_C (void)
 } 
 #endif
 
+// Fast path for the unscaled (dc_iscale == FRACUNIT), identity-colormap, opaque
+// case -- the common 2D / HUD blit.  Drops the per-pixel colormap indirection
+// and the fixed-point texture stepping of R_DrawColumnP_C: the source column is
+// read sequentially and copied straight to the strided destination.  The caller
+// (the 2D draw path) only selects this when those preconditions hold.
+void R_DrawColumnFast (void)
+{
+	int count = dc_count;
+	if (count <= 0)
+		return;
+
+	BYTE *dest = dc_dest;
+	const BYTE *source = dc_source + (dc_texturefrac >> FRACBITS);
+	int pitch = dc_pitch;
+
+	do
+	{
+		*dest = *source++;
+		dest += pitch;
+	} while (--count);
+}
+
 // [RH] Just fills a column with a color
 void R_FillColumnP (void)
 {

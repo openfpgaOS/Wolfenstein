@@ -213,6 +213,7 @@ extern "C" void R_DrawSpanMaskedP_ASM (void);
 
 void	R_DrawColumnHorizP_C (void);
 void	R_DrawColumnP_C (void);
+void	R_DrawColumnFast (void);
 void	R_DrawFuzzColumnP_C (void);
 void	R_DrawTranslatedColumnP_C (void);
 void	R_DrawShadedColumnP_C (void);

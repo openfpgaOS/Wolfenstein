@@ -277,11 +277,6 @@ MENU_LISTENER(ToggleFullscreen)
 
 	return true;
 }
-MENU_LISTENER(ToggleVsync)
-{
-	screen->SetVSync(vid_vsync);
-	return true;
-}
 MENU_LISTENER(SetAspectRatio)
 {
 	vid_aspect = static_cast<Aspect>(which);
@@ -555,9 +550,6 @@ void CreateMenus()
 	displayMenu.setHeadText(language["STR_DISPLAY"]);
 #ifndef __ANDROID__
 	displayMenu.addItem(new BooleanMenuItem(language["STR_FULLSCREEN"], vid_fullscreen, ToggleFullscreen));
-#endif
-#if SDL_VERSION_ATLEAST(2,0,0)
-	displayMenu.addItem(new BooleanMenuItem(language["STR_VSYNC"], vid_vsync, ToggleVsync));
 #endif
 	displayMenu.addItem(new MultipleChoiceMenuItem(SetAspectRatio, aspectOptions, 8, vid_aspect));
 	displayMenu.addItem(new MenuSwitcherMenuItem(language["STR_SELECTRES"], resolutionMenu, EnterResolutionSelection));

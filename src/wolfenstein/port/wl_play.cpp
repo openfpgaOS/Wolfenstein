@@ -209,6 +209,15 @@ int32_t GetTimeCount()
 	return (int32_t)(GetTimeUS() * TICRATE / 1000000ull);
 }
 
+/* DIAGNOSTIC (2026-06-23): force the proven-smooth model used by the sibling
+ * Doom port -- exactly one simulation tic per vsync-locked present, with NO
+ * render interpolation (renderfraction pinned to FRACUNIT).  This isolates the
+ * residual micro-stutter: if motion is smooth with this on, the problem is the
+ * interpolation/timing clock; if it still stutters, the problem is the present
+ * cadence or the rendering itself.  Costs ~14% game speed (60 vs 70 tics/s)
+ * while enabled.  Set to 0 to restore 70 Hz catch-up + interpolation. */
+#define OF_WOLF_DIAG_ONE_TIC 0
+
 static void UseCurrentRenderTime()
 {
 	renderfraction = FRACUNIT;
@@ -217,51 +226,75 @@ static void UseCurrentRenderTime()
 
 static void UpdateRenderInterpolation()
 {
+#if OF_WOLF_DIAG_ONE_TIC
+	/* No interpolation: render the newest tic exactly (one tic per refresh). */
+	UseCurrentRenderTime();
+	return;
+#endif
 	if((Paused & 1) || Net::IsBlocked() || gamestate.TimeCount <= 0)
 	{
 		UseCurrentRenderTime();
 		return;
 	}
 
-	/* lasttimecount is the absolute wall-clock tic index of the newest
-	 * simulated tic (CalcTics keeps it synced to GetTimeCount()), so the
-	 * newest state becomes fully current exactly one tic period after
-	 * TicsToUS(lasttimecount).  Anchoring on that exact boundary -- rather
-	 * than re-deriving it from the phase of "now" -- keeps the time mapping
-	 * consistent when the present path blocks on the display and the render
-	 * slides past a period boundary. */
-	uint64_t curtime = GetTimeUS();
-
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	/* When the loop is display-locked (the last buffer acquire blocked until
-	 * the previous swap was consumed at vsync), re-anchor the time sample on
-	 * that vsync instead of "now".  The wall-clock distance from vsync to
-	 * this call varies with maintenance/sim load every frame, and with a
-	 * fixed display cadence that variance otherwise shows up directly as
-	 * motion jitter.  Sampling vsync+4ms makes the rendered timeline a pure
-	 * function of the display clock; the 4 ms skew keeps the fraction inside
-	 * the interpolation window for any tic phase. */
-	uint32_t sinceSync;
-	if(OF_WolfGPU_USSinceDisplaySync(&sinceSync) && sinceSync < 20000u)
-		curtime = curtime - sinceSync + 4000u;
-#endif
-
+	/* Frame-counted interpolation phase.
+	 *
+	 * The in-game loop now presents exactly one frame per display refresh
+	 * (of_video_wait_flip pacing in OF_WolfGPU_PresentVideoFrame -- proven by
+	 * the one-tic diagnostic rendering perfectly smooth).  Given that, the
+	 * robust way to get a uniformly-advancing render timeline is to advance it
+	 * by a FIXED amount every presented frame, with no per-frame wall-clock or
+	 * vblank-timestamp sampling at all: sampling "now" (or a hardware stamp
+	 * that the OS may not even populate) at the variable point this function
+	 * runs is exactly what injected the residual micro-stutter.
+	 *
+	 * `advance` is the rendered tics consumed per refresh; it self-tunes to
+	 * TICRATE/refresh (=70/60) as a slow mean of the per-frame tic count, so
+	 * the 1,1,2 catch-up beat averages out.  `phase` = rendered position past
+	 * the newest snapshot's old tic; because mean(advance) == mean(tics) the
+	 * phase cannot drift secularly -- it just oscillates within ~[0,1) -- and
+	 * the rendered timeline (renderbasetimecount + renderfraction) advances by
+	 * a constant `advance` every refresh, i.e. perfectly uniform motion. */
+	static fixed phase = FRACUNIT / 2;
+	const fixed ticstep = (fixed)tics << FRACBITS;
+	/* Advance the rendered timeline by the ACTUAL displayed time since the last
+	 * frame -- the measured present period times the number of refreshes the
+	 * last present spanned -- rather than a fixed one-refresh step.  At a steady
+	 * cadence this is exactly one refresh (identical to the full-screen case
+	 * that is already smooth); when the cadence is irregular (the status-bar
+	 * of_gpu_finish serialization, a dropped frame, or VRR) it tracks the real
+	 * interval instead of letting the phase drift and snap.  Falls back to a
+	 * 70/60 step until the first inter-present interval is measured. */
+	uint32_t periodUs = 0, refreshes = 1;
+	fixed advance;
+	if(OF_WolfGPU_PresentPace(&periodUs, &refreshes))
+		advance = (fixed)(((uint64_t)periodUs * TICRATE * (uint64_t)refreshes *
+			FRACUNIT) / 1000000ull);
+	else
+		advance = (FRACUNIT * TICRATE + 30) / 60;   /* ~70/60 */
+	phase += advance - ticstep;
+	/* Bounded extrapolation either side of the snapshot interval keeps motion
+	 * linear across tic boundaries; snap to mid-interval only on gross drift (a
+	 * long stall or a refresh/sim-rate change) so phase can't run off. */
+	if(phase > FRACUNIT + FRACUNIT / 2 || phase < -(fixed)(FRACUNIT / 2))
+		phase = FRACUNIT / 2;
+	renderfraction = phase;
+	renderbasetimecount = gamestate.TimeCount - 1;
+	return;
+#else
+	/* Desktop / SDL: sample the wall clock (display pacing differs there). */
+	const uint64_t curtime = GetTimeUS();
 	const uint64_t anchor = TicsToUS((uint32_t)lasttimecount);
 	uint64_t frac = 0;
 	if(curtime > anchor)
 		frac = (curtime - anchor) * TICRATE * FRACUNIT / 1000000ull;
-	/* Allow bounded extrapolation past the newest tic instead of clamping:
-	 * the sample point can legitimately sit a few ms beyond the newest
-	 * snapshot (a tic boundary crossed between CalcTics and here).  Clamping
-	 * held the previous state for a frame -- a visible stutter while turning
-	 * at a constant rate; extrapolating the last tic's delta renders
-	 * constant-rate motion exactly and costs at most a third of a tic of
-	 * overshoot for one frame when motion stops. */
 	const uint64_t fracmax = FRACUNIT + FRACUNIT / 3;
 	if(frac > fracmax)
 		frac = fracmax;
 	renderfraction = (fixed)frac;
 	renderbasetimecount = gamestate.TimeCount - 1;
+#endif
 }
 
 static void SnapshotPlayerRenderStates()
@@ -339,6 +372,12 @@ void CalcTics()
 #if !defined(OF_ECWOLF_OPENFPGA) || defined(OF_PC)
 	else if(noadaptive)
 		tics = 1;
+#elif OF_WOLF_DIAG_ONE_TIC
+	// Diagnostic: one sim tic per vsync-locked present (Doom's smooth model).
+	// Runs ~14% slow but removes the 70/60 beat entirely.
+	else
+		tics = 1;
+	(void)noadaptive;
 #else
 	// OpenFPGA presents at display cadence; capping to one 70 Hz tic per
 	// 60 Hz frame slows gameplay, so keep real elapsed tic catch-up.
@@ -1241,19 +1280,44 @@ void FinishPaletteShifts (void)
 
 void PlayFrame()
 {
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	const uint64_t ofpgaDiagFrameStart = GetTimeUS();
+#endif
 	UpdateRenderInterpolation();
 	UpdatePaletteShifts ();
 
 	uint32_t perfStart = OF_WolfPerf_NowUS();
 	ThreeDRefresh ();
 	OF_WolfPerf_Add(OF_WOLF_PERF_RENDER, perfStart);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	const uint64_t ofpgaDiagRenderEnd = GetTimeUS();
+#endif
 
 	perfStart = OF_WolfPerf_NowUS();
-	if((automap && !gamestate.victoryflag) || (Paused & 1) ||
-		Net::IsBlocked() || (!loadedgame && viewsize != 21) || screenfaded)
+	/* Only fully end the GPU frame (blocking finish + whole-buffer cache sweep)
+	 * when something genuinely takes over the WHOLE screen on the CPU.  The
+	 * status bar alone (viewsize != 21) used to force this every frame, which
+	 * serialized the GPU render with the present and killed render-ahead --
+	 * the cause of the shrunk-view slowdown.  The status bar is now composited
+	 * with a cheap HUD-only region sync below instead. */
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	static unsigned int sbarSig = 0;
+	static unsigned sbarSince = 0;
+	static bool sbarForce = true;
+#endif
+	const bool screenTakenOver = (automap && !gamestate.victoryflag) ||
+		(Paused & 1) || Net::IsBlocked() || screenfaded;
+	if(screenTakenOver)
 	{
 		OF_WolfGPU_FallbackToCPU();
 	}
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	/* The status bar is not maintained on frames where the screen is taken over
+	 * (automap/pause/net/fade), in full-screen, or on the load screen -- force
+	 * a fresh redraw the next time it is shown. */
+	if(screenTakenOver || viewsize == 21 || loadedgame)
+		sbarForce = true;
+#endif
 
 	if(automap && !gamestate.victoryflag)
 		BasicOverhead();
@@ -1269,8 +1333,36 @@ void PlayFrame()
 	if (!loadedgame)
 	{
 		StatusBar->Tick();
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		/* The 320x40 status bar is a ~5 ms ZDoom 2D blit, and it is preserved
+		 * across frames by the acquire-time preserve copy, so only re-render it
+		 * when what it shows actually changed (or it was clobbered, or as a
+		 * periodic safety net).  This is the dominant cost of the shrunk view
+		 * and the reason it ran slow.  Skipped entirely in full-screen, where
+		 * DrawStatusBar is a no-op and the bottom rows are live 3D pixels. */
+		if(viewsize != 21)
+		{
+			const unsigned int sig = StatusBar->GetDrawSignature();
+			if(sbarForce || sig != sbarSig || ++sbarSince >= 30u)
+			{
+				/* Region-sync only the bar rows so the CPU draw is coherent
+				 * with the GPU 3D view above, without ending the GPU frame. */
+				uint8_t *gfb; int gpitch = 0, gheight = 0;
+				if(OF_WolfGPU_ActiveFrame(&gfb, &gpitch, &gheight) &&
+					gheight > 40)
+					OF_WolfGPU_MarkCPURectDisjoint(
+						gfb + (size_t)(gheight - 40) * (size_t)gpitch,
+						gpitch, 40, gpitch);
+				StatusBar->DrawStatusBar();
+				sbarSig = sig;
+				sbarSince = 0;
+				sbarForce = false;
+			}
+		}
+#else
 		if ((gamestate.TimeCount & 1) || !(tics & 1))
 			StatusBar->DrawStatusBar();
+#endif
 	}
 
 	if (screenfaded)
@@ -1286,7 +1378,35 @@ void PlayFrame()
 	 * means the next frame's input poll, simulation and interpolation
 	 * timestamps are all taken on a fresh post-vsync time base instead of
 	 * being skewed by a mid-frame stall inside the renderer. */
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	const uint64_t ofpgaDiagPresentStart = GetTimeUS();
+#endif
 	VH_UpdateScreen(true);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	{
+		const uint64_t ofpgaDiagFrameEnd = GetTimeUS();
+		static uint64_t accPeriod = 0, accRender = 0, accOverlay = 0,
+			accPresent = 0, lastStart = 0;
+		static unsigned accN = 0;
+		if(lastStart != 0)
+			accPeriod += ofpgaDiagFrameStart - lastStart;
+		lastStart = ofpgaDiagFrameStart;
+		accRender += ofpgaDiagRenderEnd - ofpgaDiagFrameStart;
+		accOverlay += ofpgaDiagPresentStart - ofpgaDiagRenderEnd;
+		accPresent += ofpgaDiagFrameEnd - ofpgaDiagPresentStart;
+		if(++accN >= 128)
+		{
+			const unsigned per = (unsigned)(accPeriod / accN);
+			printf("PERF vsize=%d period=%uus fps=%u | render=%uus "
+				"overlay=%uus present=%uus tics=%u\n",
+				viewsize, per, per ? 1000000u / per : 0u,
+				(unsigned)(accRender / accN), (unsigned)(accOverlay / accN),
+				(unsigned)(accPresent / accN), tics);
+			accPeriod = accRender = accOverlay = accPresent = 0;
+			accN = 0;
+		}
+	}
+#endif
 }
 
 /*
