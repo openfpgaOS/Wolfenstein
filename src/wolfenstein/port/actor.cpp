@@ -256,6 +256,10 @@ void AActor::Destroy()
 	// actor's TryMove may destroy us mid-scan, and the grid must never hold
 	// a link to a freed actor.
 	UnlinkActorCollision(this);
+	// Positioned sounds may still reference us; the GC read barrier cannot be
+	// relied on once the sweep frees this object, so sever the raw pointers
+	// now (the sound keeps playing from its last known position).
+	SD_ForgetSoundSource(this);
 
 	Super::Destroy();
 	RemoveFromWorld();
@@ -325,6 +329,8 @@ void AActor::Die()
 					static const fixed TILEMASK = ~(TILEGLOBAL-1);
 
 					AActor * const actor = AActor::Spawn(cls, (x&TILEMASK)+TILEGLOBAL/2, (y&TILEMASK)+TILEGLOBAL/2, 0, SPAWN_AllowReplacement);
+					if(actor == NULL)
+						continue;   // spawnee euthanized itself in BeginPlay
 					actor->angle = angle;
 					actor->dir = dir;
 
@@ -722,6 +728,10 @@ void AActor::Tick()
 // us to transfer items into inventory for example.
 void AActor::RemoveFromWorld()
 {
+	// Also drop out of the per-tic collision grid: a picked-up item must not
+	// remain touchable through its stale grid link for the rest of the tic.
+	UnlinkActorCollision(this);
+
 	actors.Remove(this);
 	if(IsThinking())
 		Deactivate();

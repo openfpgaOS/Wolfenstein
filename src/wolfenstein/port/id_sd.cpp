@@ -1204,6 +1204,29 @@ void SD_ChannelFinished(int channel)
 	channelSoundPos[channel].positioned = false;
 }
 
+bool SD_ChannelIsPlaying(int channel)
+{
+	if(!SD_Started || channel < 0 || channel >= MIX_CHANNELS)
+		return false;
+	return Mix_Playing(channel) != 0;
+}
+
+void SD_ForgetSoundSource(AActor *ob)
+{
+	// Compare the raw stored pointers (operator& skips the GC read barrier):
+	// the barrier would already report NULL for an actor being euthanized, so
+	// a barriered compare could never match and clear the stale slot.
+	for(int i = 0;i < MIX_CHANNELS;++i)
+	{
+		AActor **raw = &channelSoundPos[i].source;
+		if(*raw == ob)
+			*raw = NULL;
+	}
+	AActor **raw = &AdlibSoundPos.source;
+	if(*raw == ob)
+		*raw = NULL;
+}
+
 void
 SD_SetDigiDevice(SDSMode mode)
 {

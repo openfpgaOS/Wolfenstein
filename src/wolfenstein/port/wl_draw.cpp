@@ -636,6 +636,7 @@ typedef struct
 {
 	AActor *actor;
 	short viewheight;
+	word sortIdx;        // insertion order; deterministic tie-break for the sort
 	//short      viewx,
 	//		viewheight,
 	//		shapenum;
@@ -645,6 +646,121 @@ typedef struct
 
 visobj_t vislist[MAXVISABLE];
 visobj_t *visptr,*visstep,*farthest;
+
+// Draw farthest (smallest projected height) first; equal heights keep
+// insertion order -- the exact order the old O(n^2) selection pass produced.
+static int VisobjCompare(const void *a, const void *b)
+{
+	const visobj_t *va = (const visobj_t *)a;
+	const visobj_t *vb = (const visobj_t *)b;
+	if(va->viewheight != vb->viewheight)
+		return va->viewheight < vb->viewheight ? -1 : 1;
+	return va->sortIdx < vb->sortIdx ? -1 : (va->sortIdx > vb->sortIdx ? 1 : 0);
+}
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+/*
+ * Dense per-frame visible-spot stamps.
+ *
+ * DrawScaleds asked "is this actor's tile (or an open neighbor) visible?" for
+ * EVERY actor EVERY frame by poking up to nine fat MapSpot structs -- scattered
+ * loads across a ~400 KB array through a small D-cache.  The wall cast below
+ * stamps this compact word map as it marks spots visible, so the actor test
+ * touches at most three adjacent rows of a w*h word array (plus the dense
+ * solidity bytes it shares with the sight/walk logic).
+ */
+static TArray<uint32_t> spotVisStamp;
+static uint32_t spotVisFrame;
+static const GameMap *spotVisMap;
+static int spotVisW, spotVisH;
+
+static inline void SpotVisMark(unsigned int x, unsigned int y)
+{
+	spotVisStamp[y*(unsigned int)spotVisW + x] = spotVisFrame;
+}
+
+// Called once per wall cast, before any SpotVisMark.
+static void SpotVisNewFrame()
+{
+	const int w = (int)map->GetHeader().width;
+	const int h = (int)map->GetHeader().height;
+	if(w <= 0 || h <= 0)
+	{
+		spotVisMap = NULL;
+		return;
+	}
+	if(spotVisMap != map || spotVisW != w || spotVisH != h)
+	{
+		spotVisMap = map;
+		spotVisW = w;
+		spotVisH = h;
+		if(spotVisStamp.Size() < (unsigned int)(w*h))
+			spotVisStamp.Resize(w*h);
+		memset(&spotVisStamp[0], 0, (size_t)w*(size_t)h*sizeof(uint32_t));
+		spotVisFrame = 0;
+	}
+	if(++spotVisFrame == 0)
+	{
+		memset(&spotVisStamp[0], 0, (size_t)w*(size_t)h*sizeof(uint32_t));
+		spotVisFrame = 1;
+	}
+	// ClearVisibility marks the camera's own spot; mirror that here.
+	AActor * const cam = players[ConsolePlayer].camera;
+	if(cam && (unsigned int)cam->tilex < (unsigned int)w &&
+		(unsigned int)cam->tiley < (unsigned int)h)
+	{
+		SpotVisMark(cam->tilex, cam->tiley);
+	}
+}
+
+// Dense twin of IsActorSpotVisible: the spot itself is visible, or any of the
+// eight neighbors is visible AND open (solidity byte 0 == no tile).
+static bool IsActorSpotVisibleDense(unsigned int tx, unsigned int ty,
+	const unsigned char *tflags)
+{
+	// Unsigned compares so a wrapped-negative tile coordinate is rejected too.
+	if(tx >= (unsigned int)spotVisW || ty >= (unsigned int)spotVisH)
+		return false;
+
+	const unsigned int w = (unsigned int)spotVisW;
+	const uint32_t stamp = spotVisFrame;
+	const uint32_t *row = &spotVisStamp[ty*w + tx];
+	if(*row == stamp)
+		return true;
+
+	const unsigned char *frow = tflags + ty*w + tx;
+	const bool xm = tx > 0;
+	const bool xp = (int)tx + 1 < spotVisW;
+
+	if(xp && row[1] == stamp && frow[1] == 0)
+		return true;
+	if(xm && row[-1] == stamp && frow[-1] == 0)
+		return true;
+	if(ty > 0)
+	{
+		const uint32_t *r = row - w;
+		const unsigned char *f = frow - w;
+		if(r[0] == stamp && f[0] == 0)
+			return true;
+		if(xp && r[1] == stamp && f[1] == 0)
+			return true;
+		if(xm && r[-1] == stamp && f[-1] == 0)
+			return true;
+	}
+	if((int)ty + 1 < spotVisH)
+	{
+		const uint32_t *r = row + w;
+		const unsigned char *f = frow + w;
+		if(r[0] == stamp && f[0] == 0)
+			return true;
+		if(xp && r[1] == stamp && f[1] == 0)
+			return true;
+		if(xm && r[-1] == stamp && f[-1] == 0)
+			return true;
+	}
+	return false;
+}
+#endif
 
 static inline bool IsOpenVisibleSpot(MapSpot spot)
 {
@@ -691,13 +807,19 @@ static inline bool IsActorSpotVisible(MapSpot spot)
 
 void DrawScaleds (void)
 {
-	int      i,least,numvisable,height;
+	int      i,numvisable;
 
 	visptr = &vislist[0];
 
 //
 // place active objects
 //
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	int tfw = 0, tfh = 0;
+	const unsigned char *tflags = SimTileFlags(&tfw, &tfh);
+	const bool denseVis = tflags != NULL && spotVisMap == map &&
+		tfw == spotVisW && tfh == spotVisH;
+#endif
 	for(AActor::Iterator iter = AActor::GetIterator();iter.Next();)
 	{
 		AActor *obj = iter;
@@ -705,12 +827,15 @@ void DrawScaleds (void)
 		if (obj->sprite == SPR_NONE)
 			continue;
 
-		MapSpot spot = map->GetSpot(obj->tilex, obj->tiley, 0);
-
 		//
 		// could be in any of the nine surrounding tiles
 		//
-		if (IsActorSpotVisible(spot))
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		if (denseVis ? IsActorSpotVisibleDense(obj->tilex, obj->tiley, tflags)
+		             : IsActorSpotVisible(map->GetSpot(obj->tilex, obj->tiley, 0)))
+#else
+		if (IsActorSpotVisible(map->GetSpot(obj->tilex, obj->tiley, 0)))
+#endif
 		{
 			TransformActor (obj);
 			if (!obj->viewheight || (gamestate.victoryflag && obj == players[ConsolePlayer].mo))
@@ -718,6 +843,7 @@ void DrawScaleds (void)
 
 			visptr->actor = obj;
 			visptr->viewheight = obj->viewheight;
+			visptr->sortIdx = (word)(visptr - &vislist[0]);
 
 			if (visptr < &vislist[MAXVISABLE-1])    // don't let it overflow
 				visptr++;
@@ -732,27 +858,17 @@ void DrawScaleds (void)
 	if (!numvisable)
 		return;                                                                 // no visable objects
 
+	// Sort by projected height ascending (farthest first).  This replaces an
+	// O(n^2) selection pass -- 250 visible sprites cost ~62k scans per frame.
+	qsort(vislist, numvisable, sizeof(visobj_t), VisobjCompare);
+
 	for (i = 0; i<numvisable; i++)
 	{
-		least = 32000;
-		for (visstep=&vislist[0] ; visstep<visptr ; visstep++)
-		{
-			height = visstep->viewheight;
-			if (height < least)
-			{
-				least = height;
-				farthest = visstep;
-			}
-		}
-		//
-		// draw farthest
-		//
-		if(farthest->actor->flags & FL_BILLBOARD)
-			Scale3DSprite(farthest->actor, farthest->actor->state, farthest->viewheight);
+		visobj_t * const vis = &vislist[i];
+		if(vis->actor->flags & FL_BILLBOARD)
+			Scale3DSprite(vis->actor, vis->actor->state, vis->viewheight);
 		else
-			ScaleSprite(farthest->actor, farthest->actor->viewx, farthest->actor->state, farthest->viewheight);
-
-		farthest->viewheight = 32000;
+			ScaleSprite(vis->actor, vis->actor->viewx, vis->actor->state, vis->viewheight);
 	}
 }
 
@@ -1043,6 +1159,9 @@ vertentry:
 			}
 passvert:
 			tilehit->MarkVisible();
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+			SpotVisMark(xspot[0], xspot[1]);
+#endif
 			tilehit->amFlags |= AM_Visible;
 			xtile+=xtilestep;
 			yintercept+=ystep;
@@ -1210,6 +1329,9 @@ horizentry:
 			}
 passhoriz:
 			tilehit->MarkVisible();
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+			SpotVisMark(yspot[0], yspot[1]);
+#endif
 			tilehit->amFlags |= AM_Visible;
 			ytile+=ytilestep;
 			xintercept+=xstep;
@@ -1258,6 +1380,9 @@ void WallRefresh (void)
 	min_wallheight = viewheight;
 	lastside = -1;                  // the first pixel is on a new wall
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	SpotVisNewFrame();
+#endif
 	AsmRefresh();
 	ScalePost ();                   // no more optimization on last post
 }

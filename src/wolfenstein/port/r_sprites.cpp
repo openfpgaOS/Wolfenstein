@@ -459,8 +459,65 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 	byte *destBase = vbuf + actx + startX + ((upperedge>>3) > 0 ? vbufPitch*(upperedge>>3) : 0);
 	byte *dest = destBase;
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// Masked columns via the texture's cached opaque-span lists.  The old path
+	// walked every on-screen pixel of every sprite column to find the opaque
+	// runs -- O(on-screen sprite pixels) of CPU work per frame, the dominant
+	// render cost in object-dense scenes.  The spans give the runs directly:
+	// two divisions per span replace the per-pixel scan, and each span ships
+	// as one unmasked GPU column segment.  Segments the GPU refuses are
+	// CPU-drawn (unmasked -- spans are fully opaque) after a region sync.
 	OF_WolfGPU_PreloadSource(tex->GetPixels(), tex->GetWidth() * tex->GetHeight());
-#endif
+	const int texHeight = tex->GetHeight();
+	const fixed yStart = startY*yStep;
+	unsigned int i;
+	fixed x;
+	if(yStep <= 0)
+		return;
+	for(i = actx+startX, x = startX*xStep;x < xRun;x += xStep, ++i, dest = ++destBase)
+	{
+		if(wallheight[i] > (signed)height)
+			continue;
+
+		const FTexture::Span *spans;
+		src = tex->GetColumn(flip ? texWidth - (x>>FRACBITS) - 1 : (x>>FRACBITS),
+			&spans);
+		if(src == NULL)
+			continue;
+
+		for(const FTexture::Span *span = spans;span->Length != 0;++span)
+		{
+			const fixed t0 = (fixed)span->TopOffset << FRACBITS;
+			const fixed t1 = (fixed)(span->TopOffset + span->Length) << FRACBITS;
+			if(t0 >= yRun)
+				break;          // spans are sorted top-down; nothing below draws
+			const fixed lo = t0 > yStart ? t0 : yStart;
+			const fixed hi = t1 < yRun ? t1 : yRun;
+			if(lo >= hi)
+				continue;
+			// Screen row k samples texel (yStart + k*yStep)>>FRACBITS, so the
+			// rows covering [lo, hi) are [ceil((lo-yStart)/yStep),
+			// ceil((hi-yStart)/yStep)).
+			const int i0 = (int)((lo - yStart + yStep - 1) / yStep);
+			const int i1 = (int)((hi - yStart + yStep - 1) / yStep);
+			if(i1 <= i0)
+				continue;
+			byte *segDest = dest + i0*(int)vbufPitch;
+			const fixed segFrac = yStart + (fixed)i0*yStep;
+			if(OF_WolfGPU_DrawColumn(segDest, i1 - i0, src, texHeight,
+				segFrac, yStep, shadeIndex))
+			{
+				continue;
+			}
+			OF_WolfGPU_PrepareForCPUAccessColumn(segDest, i1 - i0, (int)vbufPitch);
+			byte *cpuDest = segDest;
+			for(fixed cy = segFrac;cy < hi;cy += yStep)
+			{
+				*cpuDest = colormap[src[cy>>FRACBITS]];
+				cpuDest += vbufPitch;
+			}
+		}
+	}
+#else
 	unsigned int i;
 	fixed x, y;
 	for(i = actx+startX, x = startX*xStep;x < xRun;x += xStep, ++i, dest = ++destBase)
@@ -473,22 +530,6 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 		if(src == NULL)
 			continue;
 
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-		{
-			const fixed yStart = startY*yStep;
-			const int count = yRun > yStart ? int((yRun - yStart + yStep - 1) / yStep) : 0;
-			if(count > 0 && OF_WolfGPU_DrawMaskedColumn(dest, count, src, tex->GetHeight(),
-				yStart, yStep, shadeIndex))
-			{
-				continue;
-			}
-			// GPU rejected the column: sync the destination cache lines and
-			// draw it on the CPU below so nothing is silently dropped.
-			if(count > 0)
-				OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, (int)vbufPitch);
-		}
-#endif
-
 		for(y = startY*yStep;y < yRun;y += yStep)
 		{
 			if(src[y>>FRACBITS])
@@ -496,6 +537,7 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 			dest += vbufPitch;
 		}
 	}
+#endif
 }
 
 void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, const Frame *frame, fixed ny1, fixed ny2, fixed nx1, fixed nx2)
@@ -759,8 +801,53 @@ void R_DrawPlayerSprite(AActor *actor, const Frame *frame, fixed offsetX, fixed 
 	byte *destBase = vbuf+x1+startX + (y1 > 0 ? vbufPitch*y1 : 0);
 	byte *dest = destBase;
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// Same span-list strategy as ScaleSprite: the weapon is the largest sprite
+	// on screen and is drawn every frame, so the per-pixel transparency scan
+	// it replaced was a fixed multi-ms tax on every frame.
 	OF_WolfGPU_PreloadSource(tex->GetPixels(), tex->GetWidth() * tex->GetHeight());
-#endif
+	const int texHeight = tex->GetHeight();
+	const fixed yStart = startY*yStep;
+	fixed x;
+	if(yStep <= 0)
+		return;
+	for(x = startX*xStep;x < xRun;x += xStep, dest = ++destBase)
+	{
+		const FTexture::Span *spans;
+		src = tex->GetColumn(x>>FRACBITS, &spans);
+		if(src == NULL)
+			continue;
+
+		for(const FTexture::Span *span = spans;span->Length != 0;++span)
+		{
+			const fixed t0 = (fixed)span->TopOffset << FRACBITS;
+			const fixed t1 = (fixed)(span->TopOffset + span->Length) << FRACBITS;
+			if(t0 >= yRun)
+				break;
+			const fixed lo = t0 > yStart ? t0 : yStart;
+			const fixed hi = t1 < yRun ? t1 : yRun;
+			if(lo >= hi)
+				continue;
+			const int i0 = (int)((lo - yStart + yStep - 1) / yStep);
+			const int i1 = (int)((hi - yStart + yStep - 1) / yStep);
+			if(i1 <= i0)
+				continue;
+			byte *segDest = dest + i0*(int)vbufPitch;
+			const fixed segFrac = yStart + (fixed)i0*yStep;
+			if(OF_WolfGPU_DrawColumn(segDest, i1 - i0, src, texHeight,
+				segFrac, yStep, shadeIndex))
+			{
+				continue;
+			}
+			OF_WolfGPU_PrepareForCPUAccessColumn(segDest, i1 - i0, (int)vbufPitch);
+			byte *cpuDest = segDest;
+			for(fixed cy = segFrac;cy < hi;cy += yStep)
+			{
+				*cpuDest = colormap[src[cy>>FRACBITS]];
+				cpuDest += vbufPitch;
+			}
+		}
+	}
+#else
 	fixed x, y;
 	for(x = startX*xStep;x < xRun;x += xStep)
 	{
@@ -771,23 +858,6 @@ void R_DrawPlayerSprite(AActor *actor, const Frame *frame, fixed offsetX, fixed 
 			continue;
 		}
 
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-		{
-			const fixed yStart = startY*yStep;
-			const int count = yRun > yStart ? int((yRun - yStart + yStep - 1) / yStep) : 0;
-			if(count > 0 && OF_WolfGPU_DrawMaskedColumn(dest, count, src, tex->GetHeight(),
-				yStart, yStep, shadeIndex))
-			{
-				dest = ++destBase;
-				continue;
-			}
-			// GPU rejected the column: sync the destination cache lines and
-			// draw it on the CPU below so nothing is silently dropped.
-			if(count > 0)
-				OF_WolfGPU_PrepareForCPUAccessColumn(dest, count, (int)vbufPitch);
-		}
-#endif
-
 		for(y = startY*yStep;y < yRun;y += yStep)
 		{
 			if(src[y>>FRACBITS] != 0)
@@ -797,6 +867,7 @@ void R_DrawPlayerSprite(AActor *actor, const Frame *frame, fixed offsetX, fixed 
 
 		dest = ++destBase;
 	}
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////

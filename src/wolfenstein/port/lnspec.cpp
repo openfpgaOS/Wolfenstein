@@ -140,7 +140,10 @@ class EVDoor : public Thinker
 		void Destroy()
 		{
 			if(sndseq)
+			{
 				delete sndseq;
+				sndseq = NULL;
+			}
 			if(spot->thinker == this)
 				spot->thinker = NULL;
 			Super::Destroy();
@@ -778,7 +781,10 @@ class EVPushwall : public Thinker
 		void Destroy()
 		{
 			if(sndseq)
+			{
 				delete sndseq;
+				sndseq = NULL;
+			}
 			if(spot->thinker == this)
 				spot->thinker = NULL;
 			Super::Destroy();
@@ -893,7 +899,10 @@ static int DoPushwall(MapSpot spot, MapTrigger::Side direction, const int *args,
 
 	if(args[0] == 0)
 	{
-		if(spot->thinker || !spot->tile || (spot->GetAdjacent(MapTile::Side(dir))->tile && !nostop))
+		// GetAdjacent returns NULL at the map edge; a pushwall on the outer
+		// ring aimed off-map must not be activated (and must not deref NULL).
+		MapSpot adj = spot->GetAdjacent(MapTile::Side(dir));
+		if(spot->thinker || !spot->tile || adj == NULL || (adj->tile && !nostop))
 		{
 			return 0;
 		}
@@ -906,7 +915,8 @@ static int DoPushwall(MapSpot spot, MapTrigger::Side direction, const int *args,
 		MapSpot pwall = NULL;
 		while((pwall = map->GetSpotByTag(args[0], pwall)))
 		{
-			if(pwall->thinker || !pwall->tile || (pwall->GetAdjacent(MapTile::Side(dir))->tile && !nostop))
+			MapSpot adj = pwall->GetAdjacent(MapTile::Side(dir));
+			if(pwall->thinker || !pwall->tile || adj == NULL || (adj->tile && !nostop))
 			{
 				continue;
 			}

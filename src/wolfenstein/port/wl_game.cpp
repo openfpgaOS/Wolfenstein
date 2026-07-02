@@ -244,6 +244,18 @@ void UpdateSoundLoc(void)
 	{
 		if(channelSoundPos[i].valid && channelSoundPos[i].positioned)
 		{
+			// The OpenFPGA mixer shim never fires Mix_ChannelFinished, so
+			// retire finished channels here; otherwise the entry stays valid
+			// forever and keeps chasing (and repositioning against) a source
+			// actor that may be long dead.
+			if(!SD_ChannelIsPlaying(i))
+			{
+				channelSoundPos[i].source = NULL;
+				channelSoundPos[i].valid = false;
+				channelSoundPos[i].positioned = false;
+				continue;
+			}
+
 			if(channelSoundPos[i].source)
 			{
 				x = channelSoundPos[i].source->x;

@@ -122,6 +122,16 @@ struct globalsoundpos
 extern globalsoundpos channelSoundPos[];
 extern globalsoundpos AdlibSoundPos;
 
+// True while the given mixer channel is still playing.  Lets UpdateSoundLoc
+// retire stale positions: the OpenFPGA mixer shim never delivers the
+// Mix_ChannelFinished callback, so channelSoundPos entries would otherwise
+// stay valid (and keep chasing their source actor) forever.
+bool SD_ChannelIsPlaying(int channel);
+// Drop any positioned-sound reference to this actor (called from
+// AActor::Destroy).  The sound keeps playing from its last known coordinates;
+// only the dangling actor pointer is cleared.
+void SD_ForgetSoundSource(class AActor *ob);
+
 // Global variables
 extern  bool			AdLibPresent,
 						SoundBlasterPresent;

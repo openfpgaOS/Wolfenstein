@@ -18,6 +18,7 @@
 #include "a_keys.h"
 #include "wl_iwad.h"
 #include "wl_net.h"
+#include "v_video.h"
 
 /*
 =============================================================================
@@ -532,12 +533,83 @@ void WolfStatusBar::RefreshBackground(bool noborder)
 	VWB_DrawGraphic(TexMan("STBACK"), 0, 160);
 }
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+/* The status bar background went through the generic scaled/masked 2D blitter
+ * every redraw (~most of the bar's ~5 ms), and during combat the bar redraws
+ * almost every frame -- the ammo counter changes faster than the frame rate
+ * while firing.  On the 320x200 native mode the blit is an unscaled opaque
+ * copy, so compose the 320x40 background once into a row-major block and
+ * memcpy it per redraw.  Any precondition miss falls back to the old path. */
+static TArray<BYTE> sbarRowCache;
+static FTexture *sbarRowCacheTex;
+static FTexture *sbarRowCacheRejectedTex;
+
+static bool DrawBarBackgroundFast(FTexture *bar)
+{
+	if(bar == NULL || bar == sbarRowCacheRejectedTex || screen == NULL ||
+		screen->GetWidth() != 320 || screen->GetHeight() != 200)
+	{
+		return false;
+	}
+	if(bar->GetWidth() != 320 || bar->GetHeight() != STATUSLINES ||
+		bar->xScale != FRACUNIT || bar->yScale != FRACUNIT)
+	{
+		return false;
+	}
+
+	if(sbarRowCacheTex != bar || sbarRowCache.Size() != 320u*STATUSLINES)
+	{
+		const BYTE *pix = bar->GetPixels();   // column-major
+		if(pix == NULL)
+			return false;
+		// The masked blitter skips index-0 texels; a raw copy would paint
+		// them.  bMasked defaults to true even for opaque pics, so verify
+		// real opacity here (once) instead of trusting the flag.
+		sbarRowCache.Resize(320*STATUSLINES);
+		for(int x = 0;x < 320;++x)
+		{
+			for(int y = 0;y < STATUSLINES;++y)
+			{
+				const BYTE p = pix[x*STATUSLINES + y];
+				if(p == 0)
+				{
+					sbarRowCacheRejectedTex = bar;
+					return false;
+				}
+				sbarRowCache[y*320 + x] = p;
+			}
+		}
+		sbarRowCacheTex = bar;
+	}
+
+	screen->Lock(false);
+	BYTE *dest = screen->GetBuffer();
+	const int pitch = screen->GetPitch();
+	if(dest == NULL || pitch < 320)
+	{
+		screen->Unlock();
+		return false;
+	}
+	dest += (200 - STATUSLINES)*pitch;
+	for(int y = 0;y < STATUSLINES;++y)
+		memcpy(dest + y*pitch, &sbarRowCache[y*320], 320);
+	screen->Unlock();
+	return true;
+}
+#endif
+
 void WolfStatusBar::DrawStatusBar()
 {
 	if(viewsize == 21 && ingame)
 		return;
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	FTexture * const bar = TexMan("STBAR");
+	if(!DrawBarBackgroundFast(bar))
+		VWB_DrawGraphic(bar, 0, 160);
+#else
 	VWB_DrawGraphic(TexMan("STBAR"), 0, 160);
+#endif
 	DrawFace ();
 	DrawHealth ();
 	DrawLives ();
