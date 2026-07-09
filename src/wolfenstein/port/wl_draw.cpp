@@ -30,6 +30,8 @@
 #include "wl_state.h"
 #include "a_inventory.h"
 #include "thingdef/thingdef.h"
+#include "colormatcher.h"
+#include "v_palette.h"
 #include "of_ecwolf_gpu.h"
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 #define OF_ECWOLF_WALL_GPU_ENABLED 1
@@ -157,6 +159,25 @@ int		texheight;
 fixed	texxscale = FRACUNIT;
 fixed	texyscale = FRACUNIT;
 
+/* Far-wall texture LOD (anti-shimmer).  Point-sampled walls beyond ~2
+ * texels per screen row re-roll 50-85% of their pixels every frame while
+ * the view turns (temporal aliasing perceived as boiling/blur, growing
+ * with distance).  Once minification reaches 2/4/8 texels per row the wall
+ * run samples a box-filtered half/quarter/eighth-res copy instead, so the
+ * sparse samples land on stable, prefiltered colors.  Mips are built
+ * lazily per texture (palette-space box filter through ColorMatcher) and
+ * dropped whenever the source pixel buffers change.  Set to 0 for an A/B
+ * against raw point sampling. */
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#define OF_WALL_TEXTURE_LOD 1
+#else
+#define OF_WALL_TEXTURE_LOD 0
+#endif
+#if OF_WALL_TEXTURE_LOD
+static int texlod = 0;          /* mip level of the active wall run */
+static int texlodheight = 0;    /* column height in bytes at that level */
+#endif
+
 
 /*
 ============================================================================
@@ -273,6 +294,130 @@ int CalcHeight()
 const byte *postsource;
 int postx;
 
+#if OF_WALL_TEXTURE_LOD
+struct WallMipSet
+{
+	FTexture *texture;
+	const byte *srcPixels;   /* GetPixels() at build time (staleness check) */
+	TArray<byte> mip[3];     /* levels 1..3, column-major, (W>>L) x (H>>L) */
+};
+static TArray<WallMipSet> wallMipCache;
+
+/* ColorMatcher.Pick is a 256-entry palette search (~2k cycles) and one mip
+ * build issues ~1300 of them -- tens of milliseconds on this CPU.  Memoize
+ * on the RGB444-quantized average: the palette is fixed, so hits persist
+ * across textures and levels.  RGB444 (not 555) on purpose: the app heap
+ * is [bss_end, mmap_bottom) and the startup file slurps run within tens
+ * of KB of that ceiling, so these tables must stay small (4.5 KB); the
+ * +/-8 per channel quantization is invisible in a distance-filtered mip.
+ * Dropped with the mips (the same event covers palette invalidation). */
+static BYTE wallMipPickCache[1 << 12];
+static DWORD wallMipPickValid[(1 << 12) >> 5];
+
+static inline BYTE WallMipPick(int r, int g, int b)
+{
+	const unsigned int key = ((unsigned int)(r & 0xF0) << 4) |
+		(unsigned int)(g & 0xF0) | ((unsigned int)b >> 4);
+	if(!(wallMipPickValid[key >> 5] & (1u << (key & 31))))
+	{
+		wallMipPickValid[key >> 5] |= 1u << (key & 31);
+		wallMipPickCache[key] = ColorMatcher.Pick(r, g, b);
+	}
+	return wallMipPickCache[key];
+}
+
+/* Called from OF_WolfGPU_SourceBuffersChanged: the texture pixel buffers
+ * the mips were filtered from may have been freed or recomposed (possibly
+ * at the same address, so a pointer compare alone is not enough), and the
+ * same event fires on palette invalidation (covers the pick cache). */
+void R_InvalidateWallTextureLOD()
+{
+	wallMipCache.Clear();
+	memset(wallMipPickValid, 0, sizeof(wallMipPickValid));
+}
+
+/* 2x2 palette-space box filter, column-major in and out.  Odd trailing
+ * rows/columns are cropped (callers only request levels that divide
+ * cleanly). */
+static void WallMipDownsample(const byte *src, int w, int h, TArray<byte> &out)
+{
+	const int mw = w >> 1, mh = h >> 1;
+	if(mw <= 0 || mh <= 0)
+	{
+		out.Clear();
+		return;
+	}
+	out.Resize(mw * mh);
+	for(int x = 0; x < mw; ++x)
+	{
+		const byte *c0 = src + (2*x) * h;
+		const byte *c1 = c0 + h;
+		byte *dst = &out[x * mh];
+		for(int y = 0; y < mh; ++y)
+		{
+			const PalEntry &p0 = GPalette.BaseColors[c0[2*y]];
+			const PalEntry &p1 = GPalette.BaseColors[c0[2*y + 1]];
+			const PalEntry &p2 = GPalette.BaseColors[c1[2*y]];
+			const PalEntry &p3 = GPalette.BaseColors[c1[2*y + 1]];
+			dst[y] = WallMipPick(
+				(p0.r + p1.r + p2.r + p3.r + 2) >> 2,
+				(p0.g + p1.g + p2.g + p3.g + 2) >> 2,
+				(p0.b + p1.b + p2.b + p3.b + 2) >> 2);
+		}
+	}
+}
+
+static const byte *WallTextureMip(FTexture *texture, const byte *pixels,
+                                  int width, int height, int lod)
+{
+	WallMipSet *set = NULL;
+	for(unsigned int i = 0; i < wallMipCache.Size(); ++i)
+	{
+		if(wallMipCache[i].texture == texture)
+		{
+			if(wallMipCache[i].srcPixels == pixels)
+				set = &wallMipCache[i];
+			else
+				wallMipCache.Delete(i); /* recomposed: rebuild below */
+			break;
+		}
+	}
+	if(set == NULL)
+	{
+		WallMipSet fresh;
+		fresh.texture = texture;
+		fresh.srcPixels = pixels;
+		WallMipDownsample(pixels, width, height, fresh.mip[0]);
+		WallMipDownsample(&fresh.mip[0][0], width >> 1, height >> 1, fresh.mip[1]);
+		WallMipDownsample(&fresh.mip[1][0], width >> 2, height >> 2, fresh.mip[2]);
+		wallMipCache.Push(fresh);
+		set = &wallMipCache[wallMipCache.Size() - 1];
+	}
+	if(set->mip[lod - 1].Size() == 0)
+		return NULL;
+	return &set->mip[lod - 1][0];
+}
+
+/* Build a texture's mips behind the load screen (called from
+ * FTextureManager::PrecacheLevel, AFTER its SourceBuffersChanged reset): a
+ * lazy mid-game build is a ColorMatcher pass over the whole texture -- a
+ * visible multi-frame hiccup the first time a texture shows up far away. */
+void R_PrebuildWallTextureLOD(FTexture *texture)
+{
+	if(texture == NULL)
+		return;
+	const int width = texture->GetWidth();
+	const int height = texture->GetHeight();
+	const byte *pixels = texture->GetPixels();
+	if(width <= 0 || height <= 0 || pixels == NULL)
+		return;
+	// Same eligibility as WallTextureColumn's cheapest level.
+	if(((width | height) & 1) != 0 || (height >> 1) < 8)
+		return;
+	WallTextureMip(texture, pixels, width, height, 1);
+}
+#endif // OF_WALL_TEXTURE_LOD
+
 static const byte *WallTextureColumn(FTexture *texture, int texcoord)
 {
 	if(texture == NULL || texxscale <= 0)
@@ -284,15 +429,49 @@ static const byte *WallTextureColumn(FTexture *texture, int texcoord)
 	if(width <= 0 || height <= 0 || pixels == NULL)
 		return NULL;
 
-#if defined(OF_ECWOLF_WALL_GPU_ENABLED)
-	OF_WolfGPU_PreloadSource(pixels, (uint32_t)(width * height));
-#endif
-
 	int column = texcoord / texxscale;
 	if(column < 0)
 		column = 0;
 	if(column >= width)
 		column %= width;
+
+#if OF_WALL_TEXTURE_LOD
+	texlod = 0;
+	texlodheight = height;
+	{
+		/* Vertical minification = texyscale/wallheight texels per screen
+		 * row; pick the mip whose sampling rate lands back in [1, 2). */
+		const int yd = wallheight[postx] > 0 ? wallheight[postx] : 100;
+		int lod = 0;
+		if((yd << 1) <= texyscale) lod = 1;
+		if((yd << 2) <= texyscale) lod = 2;
+		if((yd << 3) <= texyscale) lod = 3;
+		/* Dimensions must halve cleanly and the smallest mip must stay a
+		 * GPU-usable >= 8-texel power-of-two column. */
+		while(lod > 0 && (((width | height) & ((1 << lod) - 1)) != 0 ||
+			(height >> lod) < 8))
+			--lod;
+		if(lod > 0)
+		{
+			const byte *mip = WallTextureMip(texture, pixels, width, height, lod);
+			if(mip)
+			{
+				texlod = lod;
+				texlodheight = height >> lod;
+				texyscale >>= lod; /* CPU DDA + GPU sourceLen follow this */
+#if defined(OF_ECWOLF_WALL_GPU_ENABLED)
+				OF_WolfGPU_PreloadSource(mip,
+					(uint32_t)((width >> lod) * texlodheight));
+#endif
+				return mip + (column >> lod) * texlodheight;
+			}
+		}
+	}
+#endif
+
+#if defined(OF_ECWOLF_WALL_GPU_ENABLED)
+	OF_WolfGPU_PreloadSource(pixels, (uint32_t)(width * height));
+#endif
 	return pixels + column * height;
 }
 
@@ -493,7 +672,15 @@ void HitVertWall (void)
 		ScalePost();
 		wallheight[pixx] = CalcHeight();
 		if(postsource)
+#if OF_WALL_TEXTURE_LOD
+			/* Advance by whole mip columns: column indices shift by the
+			 * run's LOD (floor division is not distributive over the
+			 * difference).  texlod == 0 reduces to the original stride. */
+			postsource += (((texture / texxscale) >> texlod)
+				- ((lasttexture / texxscale) >> texlod)) * texlodheight;
+#else
 			postsource+=(texture-lasttexture)*texheight/texxscale;
+#endif
 		postx=pixx;
 		lasttexture=texture;
 		return;
@@ -567,7 +754,13 @@ void HitHorizWall (void)
 		ScalePost();
 		wallheight[pixx] = CalcHeight();
 		if(postsource)
+#if OF_WALL_TEXTURE_LOD
+			/* See HitVertWall: whole-mip-column advance. */
+			postsource += (((texture / texxscale) >> texlod)
+				- ((lasttexture / texxscale) >> texlod)) * texlodheight;
+#else
 			postsource+=(texture-lasttexture)*texheight/texxscale;
+#endif
 		postx=pixx;
 		lasttexture=texture;
 		return;

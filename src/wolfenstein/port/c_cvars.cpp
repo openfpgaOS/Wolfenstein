@@ -218,6 +218,23 @@ void ReadConfig(void)
 	forcegrabmouse = config.GetSetting("ForceGrabMouse")->GetInteger() != 0;
 	mouseenabled = config.GetSetting("MouseEnabled")->GetInteger() != 0;
 	joystickenabled = config.GetSetting("JoystickEnabled")->GetInteger() != 0;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// The Pocket's gamepad layout is defined by the controlScheme source
+	// defaults and has been retuned across builds, but CreateSetting only
+	// seeds a value when the key is ABSENT -- a config written by an older
+	// build keeps its stale Joystick_* numbers forever, which can leave one
+	// physical button bound to two actions (select toggling the automap AND
+	// switching weapons).  Version the pad bindings: on a bump, drop every
+	// saved Joystick_* value so the loop below re-seeds the source
+	// defaults.  Keyboard/mouse bindings are untouched; in-game rebinds
+	// persist until the next source retune.
+	static const int joyBindingsVersion = 2;
+	config.CreateSetting("JoyBindingsVersion", 0);
+	const bool joyBindingsStale =
+		config.GetSetting("JoyBindingsVersion")->GetInteger() != joyBindingsVersion;
+	if(joyBindingsStale)
+		config.GetSetting("JoyBindingsVersion")->SetValue(joyBindingsVersion);
+#endif
 	for(unsigned int i = 0;controlScheme[i].button != bt_nobutton;i++)
 	{
 		mysnprintf(joySettingName, 50, "Joystick_%s", controlScheme[i].name);
@@ -235,6 +252,12 @@ void ReadConfig(void)
 			if(mseSettingName[j] == ' ')
 				mseSettingName[j] = '_';
 		}
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		// Version bump: discard the saved pad binding so CreateSetting
+		// below re-seeds this build's source default.
+		if(joyBindingsStale)
+			config.DeleteSetting(joySettingName);
+#endif
 		config.CreateSetting(joySettingName, controlScheme[i].joystick);
 		config.CreateSetting(keySettingName, SDL2Backconvert(controlScheme[i].keyboard));
 		config.CreateSetting(mseSettingName, controlScheme[i].mouse);

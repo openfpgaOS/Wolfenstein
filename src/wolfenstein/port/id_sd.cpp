@@ -1188,7 +1188,17 @@ static int SD_PlayDigitized(const SoundData &which,int leftpos,int rightpos,Soun
 		Mix_HaltChannel(channel);
 	if(Mix_PlayChannel(channel, sample, 0) == -1)
 	{
-		printf("Unable to play sound: %s\n", Mix_GetError());
+		// This fires under NORMAL transient conditions (all hardware voices
+		// busy in heavy combat, or a lazily-loaded sound's PCM not ready
+		// yet), and the console printf is a blocking UART write -- i.e. a
+		// frame hitch per occurrence.  Report the first one only.
+		static bool reportedOnce = false;
+		if(!reportedOnce)
+		{
+			reportedOnce = true;
+			printf("Unable to play sound: %s (further occurrences muted)\n",
+				Mix_GetError());
+		}
 		return 0;
 	}
 

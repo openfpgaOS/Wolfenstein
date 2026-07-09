@@ -416,10 +416,14 @@ void GameMap::GetHitlist(BYTE* hitlist) const
 
 			if(spot.tile)
 			{
+				// Bit 1 = column/span usage (shared with sprites); bit 4
+				// additionally marks WALL textures so the far-wall LOD
+				// prebuild can find exactly these (prebuilding on bit 1
+				// would compose pixel buffers for every sprite too).
 				hitlist[spot.tile->texture[Tile::East].GetIndex()] =
 					hitlist[spot.tile->texture[Tile::North].GetIndex()] =
 					hitlist[spot.tile->texture[Tile::West].GetIndex()] =
-					hitlist[spot.tile->texture[Tile::South].GetIndex()] |= 1;
+					hitlist[spot.tile->texture[Tile::South].GetIndex()] |= 1|4;
 			}
 
 			if(spot.sector)

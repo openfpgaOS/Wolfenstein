@@ -1,5 +1,6 @@
 #ifndef OF_PC
 
+#include "of_caps.h"
 #include "of_file.h"
 #include "of_mount.h"
 #include "of_services.h"
@@ -135,6 +136,18 @@ __attribute__((constructor(200)))
 static void of_ecwolf_openfpga_init(void)
 {
     char name[16];
+
+    /* Boot-time heap report: the app heap is [bss_end, mmap_bottom) and the
+     * image + startup slurps run close to it -- one look at the UART tells
+     * how much headroom a build has left (an image-growth OOM shows up here
+     * as a small number long before the failing malloc). */
+    {
+        const struct of_capabilities *caps = of_get_caps();
+        if (caps && caps->magic == OF_CAPS_MAGIC)
+            printf("OpenFPGA: app heap %lu KB at %08lx.\n",
+                   (unsigned long)(caps->heap_size >> 10),
+                   (unsigned long)caps->heap_base);
+    }
 
     of_ecwolf_setenv_default("HOME", "/");
     of_ecwolf_setenv_default("XDG_CONFIG_HOME", "/");

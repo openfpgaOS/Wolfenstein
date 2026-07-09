@@ -425,6 +425,10 @@ void UnlinkActorCollision (AActor *ob)
 	}
 }
 
+/* Console reporting of oversized actors: enable only when hunting
+ * misdeclared DECORATE radii (blocking UART write = frame hitch). */
+#define OF_WOLF_DIAG_COLLISION_GRID 0
+
 void RebuildActorCollisionGrid ()
 {
 	if(map == NULL)
@@ -493,8 +497,12 @@ void RebuildActorCollisionGrid ()
 			collisionGridMaxRadius = actor->radius;
 	}
 
+#if OF_WOLF_DIAG_COLLISION_GRID
 	// Diagnostic: name the oversized actors once per change so outliers
-	// (misdeclared DECORATE radii) are visible on the console.
+	// (misdeclared DECORATE radii) are visible on the console.  Compiled
+	// out for shipping: the console write is a blocking UART transfer, so
+	// a mid-game count change (a big-radius boss spawning or dying) lands
+	// as a frame hitch.
 	static unsigned int lastOversized = ~0u;
 	if(collisionGridOversized.Size() != lastOversized)
 	{
@@ -508,6 +516,7 @@ void RebuildActorCollisionGrid ()
 				(int)(((a->radius & (TILEGLOBAL - 1)) * 100) >> TILESHIFT));
 		}
 	}
+#endif
 }
 
 // The exact predicate TrySpot (wl_state.cpp) historically applied to every

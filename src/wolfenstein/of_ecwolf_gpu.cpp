@@ -1627,8 +1627,16 @@ void OF_WolfGPU_PreloadSource(const uint8_t *source, uint32_t bytes)
  * switched-to weapon sprite).  Forget all cached source state so the next use
  * re-flushes, and schedule a GPU texture-cache flush for the next frame
  * start. */
+// wl_draw.cpp: drop the far-wall LOD mips derived from the texture pixel
+// buffers this event invalidates.
+void R_InvalidateWallTextureLOD();
+
 void OF_WolfGPU_SourceBuffersChanged(void)
 {
+	// Run this even without a GPU: the CPU column fallback samples the same
+	// mip buffers.
+	R_InvalidateWallTextureLOD();
+
 	if(!gpu_available)
 		return;
 

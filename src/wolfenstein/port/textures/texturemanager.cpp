@@ -49,6 +49,11 @@
 //#include "g_level.h"
 #include "textures.h"
 #include "zdoomsupport.h"
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+// wl_draw.cpp: prebuild the far-wall LOD mips behind the load screen.
+void R_PrebuildWallTextureLOD(FTexture *texture);
+#endif
 #include "id_ca.h"
 #include "g_mapinfo.h"
 #include "gamemap.h"
@@ -1382,6 +1387,21 @@ void FTextureManager::PrecacheLevel (void (*progress)(unsigned done, unsigned to
 	// drop the GPU source caches so later compositions into reused heap
 	// memory cannot match stale flush state.
 	OF_WolfGPU_SourceBuffersChanged();
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// Far-wall LOD mips (wl_draw.cpp): build them here behind the load
+	// screen, AFTER the source-cache reset above (which also drops any
+	// previously built set).  Building one lazily mid-game is a
+	// ColorMatcher pass over the texture -- a visible multi-frame hiccup.
+	// Bit 4 marks WALL textures specifically (GameMap::GetHitlist); bit 1
+	// alone also covers sprites, whose pixel buffers must NOT be composed
+	// here (megabytes of heap on sprite-heavy levels).
+	for (int i = cnt - 1; i > 0; i--)
+	{
+		if (hitlist[i] & 4)
+			R_PrebuildWallTextureLOD(ByIndex(i-1));
+	}
+#endif
 
 #if 0
 	// Debug code - Show number of textures precached
