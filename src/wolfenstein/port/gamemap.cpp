@@ -286,6 +286,13 @@ bool GameMap::CheckLink(const Zone *zone1, const Zone *zone2, bool recurse)
 	if(zone1 == NULL || zone2 == NULL)
 		return false;
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// Captured BEFORE the index swap: every recursive caller passes the
+	// player's zone as the second argument, so flooding from it makes the
+	// cache player-sourced and every enemy query afterwards a cache hit.
+	const Zone * const floodSrc = zone2;
+#endif
+
 	// We only have the top half of the table.
 	if(zone2->index < zone1->index)
 	{
@@ -300,19 +307,26 @@ bool GameMap::CheckLink(const Zone *zone1, const Zone *zone2, bool recurse)
 		return straightCheck;
 
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
-	// Transitive reachability is symmetric.  Every recursive CheckLink
-	// caller passes the player's zone as zone2, so flood once from zone2
-	// and let all enemies share the result (cached until a link changes or
-	// the queried zone differs).  Reachability is identical to the flood.
+	// Transitive reachability is symmetric, so one cached flood answers
+	// every query that involves its source zone.  The index swap above can
+	// put the player's zone in EITHER parameter, so accept the cache when
+	// its source matches either endpoint and index with the other; on a
+	// miss, flood from the pre-swap second argument (the player's zone by
+	// caller convention) so the cache stays player-sourced.  Invalidated
+	// only when a door links/unlinks zones (LinkZones).
 	if(zonePalette.Size() > 0)
 	{
-		if(!hearingValid || hearingSource != zone2)
+		if(hearingValid)
 		{
-			FloodReachable(zone2);
-			hearingSource = zone2;
-			hearingValid = true;
+			if(hearingSource == zone1)
+				return hearingReachable[zone2->index];
+			if(hearingSource == zone2)
+				return hearingReachable[zone1->index];
 		}
-		return hearingReachable[zone1->index];
+		FloodReachable(floodSrc);
+		hearingSource = floodSrc;
+		hearingValid = true;
+		return hearingReachable[floodSrc == zone1 ? zone2->index : zone1->index];
 	}
 #endif
 

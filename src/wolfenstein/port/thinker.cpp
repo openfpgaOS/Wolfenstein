@@ -72,6 +72,20 @@ void ThinkerList::DestroyAll(Priority start)
 				thinker->Destroy();
 		}
 	}
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// The dormant side list holds NORMAL-priority thinkers.
+	if(start <= NORMAL)
+	{
+		Iterator iter = dormant.Head();
+		while(iter)
+		{
+			Thinker *thinker = iter++;
+
+			if(!(thinker->ObjectFlags & OF_EuthanizeMe))
+				thinker->Destroy();
+		}
+	}
+#endif
 	GC::FullGC();
 }
 
@@ -90,6 +104,22 @@ void ThinkerList::MarkRoots()
 			}
 		}
 	}
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// The dormant side list is a GC root chain of its own; marking its
+	// first live node lets PropagateMark reach the rest via elNext/elPrev.
+	{
+		Iterator iter(dormant);
+		while(iter.Next())
+		{
+			Thinker *thinker = iter;
+			if(!(thinker->ObjectFlags & OF_EuthanizeMe))
+			{
+				GC::Mark(thinker);
+				break;
+			}
+		}
+	}
+#endif
 }
 
 void ThinkerList::Tick()
@@ -122,10 +152,32 @@ void ThinkerList::Tick(Priority list)
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 			// Skip static objects (decorations, idle pickups, patrol
 			// points): they rest on an infinite frame with no thinker, so
-			// ticking them is wasted work.  SetState clears the flag if
-			// anything changes their state.
+			// ticking them is wasted work.  SetState wakes them if anything
+			// changes their state.
 			if(!thinker->ofThinkDormant)
+			{
 				thinker->Tick();
+				// The tick just made it dormant: divert it to the side
+				// list so this walk stops visiting it entirely (the flag
+				// skip alone still paid a pointer chase + flag load per
+				// dormant node per tic).  NORMAL only, to keep Deregister
+				// dispatch and serialization simple; other priorities are
+				// rare and stay flag-skipped.
+				// Guards: a self-destroyed thinker was already deregistered
+				// (euthanize check); a thinker that changed its own priority
+				// during Tick (A_BossDeath -> deathcam SetPriority(VICTORY))
+				// is now linked in ANOTHER list, so removing it from
+				// thinkers[NORMAL] would corrupt both list heads (priority
+				// check); one that deactivated without destroying is
+				// unlinked entirely (IsLinked check).
+				if(thinker->ofThinkDormant && list == NORMAL &&
+					thinker->thinkerPriority == NORMAL &&
+					!(thinker->ObjectFlags & OF_EuthanizeMe) &&
+					EmbeddedList<Thinker>::List::IsLinked(thinker))
+				{
+					MoveToDormant(thinker);
+				}
+			}
 #else
 			thinker->Tick();
 			GC::CheckGC();
@@ -148,6 +200,22 @@ void ThinkerList::Serialize(FArchive &arc)
 				Thinker *thinker = iter;
 				arc << thinker;
 			}
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+			// Dormant thinkers are all NORMAL priority; store them inside
+			// the NORMAL section so loads (which Register into the section
+			// index, clearing the transient flag) rebuild identically --
+			// they re-divert on their first tick.
+			if(i == NORMAL)
+			{
+				Iterator diter(dormant);
+				while(diter.Next())
+				{
+					Thinker *thinker = diter;
+					arc << thinker;
+				}
+			}
+#endif
 
 			Thinker *terminator = NULL;
 			arc << terminator; // Terminate list
@@ -179,6 +247,12 @@ void ThinkerList::Register(Thinker *thinker, Priority type)
 {
 	thinkers[type].Push(thinker);
 	thinker->thinkerPriority = type;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// Every (re)registration targets a tick list -- keep the dormant-list
+	// membership invariant (flag && NORMAL <=> in dormant) intact even
+	// across SetPriority and save-game loads.
+	thinker->ofThinkDormant = false;
+#endif
 
 	Iterator head(thinker);
 	if(head.Next())
@@ -198,6 +272,12 @@ void ThinkerList::Deregister(Thinker *thinker)
 	if(nextThinker == thinker)
 		nextThinker = next;
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// Dormant NORMAL thinkers live in the side list, not thinkers[NORMAL].
+	if(thinker->ofThinkDormant && thinker->thinkerPriority == NORMAL)
+		dormant.Remove(thinker);
+	else
+#endif
 	thinkers[thinker->thinkerPriority].Remove(thinker);
 	if(prev && next)
 	{
@@ -205,6 +285,58 @@ void ThinkerList::Deregister(Thinker *thinker)
 		GC::WriteBarrier(next, prev);
 	}
 }
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+void ThinkerList::MoveToDormant(Thinker *thinker)
+{
+	Thinker * const prev = static_cast<Thinker*>(thinker->elPrev);
+	Thinker * const next = static_cast<Thinker*>(thinker->elNext);
+
+	thinkers[NORMAL].Remove(thinker);
+	if(prev && next)
+	{
+		GC::WriteBarrier(prev, next);
+		GC::WriteBarrier(next, prev);
+	}
+
+	dormant.Push(thinker);
+
+	// Same GC bookkeeping as Register: the new head links form a fresh
+	// reference chain for PropagateMark.
+	Iterator head(thinker);
+	if(head.Next())
+	{
+		GC::WriteBarrier(thinker, head);
+		GC::WriteBarrier(head, thinker);
+	}
+	GC::WriteBarrier(thinker);
+}
+
+void ThinkerList::WakeDormant(Thinker *thinker)
+{
+	// Only NORMAL-priority thinkers are ever diverted; others carry the
+	// (already cleared) flag while sitting in their own tick list.
+	if(thinker->thinkerPriority != NORMAL)
+		return;
+	// Stale-flag safety: an actor that destroyed itself during its Tick can
+	// carry the flag without being linked anywhere -- never resurrect it.
+	if(thinker->ObjectFlags & OF_EuthanizeMe)
+		return;
+	if(!EmbeddedList<Thinker>::List::IsLinked(thinker))
+		return;
+
+	Thinker * const prev = static_cast<Thinker*>(thinker->elPrev);
+	Thinker * const next = static_cast<Thinker*>(thinker->elNext);
+	dormant.Remove(thinker);
+	if(prev && next)
+	{
+		GC::WriteBarrier(prev, next);
+		GC::WriteBarrier(next, prev);
+	}
+
+	Register(thinker, thinker->thinkerPriority);
+}
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 

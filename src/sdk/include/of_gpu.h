@@ -202,6 +202,12 @@ typedef struct {
     int32_t  light_du;
     int32_t  light_dv;
 
+    /* Per-axis texture coordinate clamp window (signed Q16.16); 0/0 =
+     * clamp disabled for that axis.  CONTRACT: clamp_min[i] <=
+     * clamp_max[i] (signed) per axis — the HW clamps the coordinate's
+     * integer part with 16-bit top-half compares that are equivalent to
+     * the full 32-bit clamp ONLY under this ordering; behavior is
+     * UNDEFINED for min > max. */
     int32_t  clamp_min[3];
     int32_t  clamp_max[3];
 
@@ -486,9 +492,13 @@ static inline void _gpu_select_batch_buffer(uint32_t index) {
 }
 
 static inline void _gpu_wait_dma_idle_debug(void) {
+    /* Bounded like of_gpu_wait: a wedged doorbell DMA otherwise spins
+     * here forever with no diagnostic. */
     uint32_t dma_spins = 0;
-    while (GPU_STATUS & GPU_STATUS_DMA_BUSY)
-        dma_spins++;
+    while (GPU_STATUS & GPU_STATUS_DMA_BUSY) {
+        if (++dma_spins == 50000000u)
+            __builtin_trap();  /* → fatal_trap dumps GPU state */
+    }
     _gpu_batch_inflight_mask = 0;
     if (dma_spins) {
         _gpu_dbg_dma_waits++;
@@ -504,8 +514,10 @@ static inline void _gpu_wait_dma_desc_slot_debug(void) {
         return;
 
     uint32_t dma_spins = 0;
-    while (GPU_STATUS & GPU_STATUS_DMA_DESC_FULL)
-        dma_spins++;
+    while (GPU_STATUS & GPU_STATUS_DMA_DESC_FULL) {
+        if (++dma_spins == 50000000u)
+            __builtin_trap();  /* wedged DMA queue — see of_gpu_wait */
+    }
     if (dma_spins) {
         _gpu_dbg_dma_waits++;
         _gpu_dbg_dma_spin_iters += dma_spins;
@@ -575,13 +587,35 @@ static inline void _gpu_flush_cmd_stream(void) {
     uint32_t submit_words = _gpu_cmd_words;
     uint32_t submit_index = _gpu_batch_index;
 
-    _gpu_flush_cmd_cache_range(_gpu_batch_buf, submit_words * 4u);
-    _gpu_drain_cmd_writeback(submit_words * 4u);
+    /* Publish the staged commands to DRAM through the UNCACHED alias.
+     *
+     * The previous cbo.flush + same-master cached-readback "drain" was a
+     * timing heuristic, and it loses on MiSTer: the doorbell DMA has
+     * GPU-over-CPU priority at the SDRAM arbiter, and a dirty line whose
+     * writeback hadn't physically landed was read back by the GPU as the
+     * line's PREVIOUS content — valid-looking command words from two
+     * submissions ago in the same staging slot (screen-visible as stale
+     * replayed draws + contiguous missing column runs; same failure class
+     * as the HW-confirmed white-texel bug).  Uncached stores are ordered
+     * by construction: each completes on its AXI B-response through the
+     * same single-outstanding fabric the GPU's pull reads, so when the
+     * kick lands every word is in SDRAM.  The cached copy stays valid for
+     * the CPU (no invalidate), so emission reads/writes stay fast; the
+     * uncached copy below is the only publish step.  (_gpu_flush_cmd_
+     * cache_range/_gpu_drain_cmd_writeback above are retired from this
+     * path — kept only for reference.) */
+    {
+        volatile uint32_t *dst =
+            (volatile uint32_t *)of_uncached(_gpu_batch_buf);
+        for (uint32_t w = 0; w < submit_words; w++)
+            dst[w] = _gpu_batch_buf[w];
+    }
+    __asm__ volatile("fence" ::: "memory");
     _gpu_wait_dma_desc_slot_debug();
 
-    /* The writeback drain above is the data-visibility barrier.  The GPU MMIO
-     * doorbell registers sit on a single in-order peripheral path, so extra
-     * CPU fences between these volatile writes only add submit latency. */
+    /* The uncached publish above is the data-visibility barrier.  The GPU
+     * MMIO doorbell registers sit on a single in-order peripheral path, so
+     * extra CPU fences between these volatile writes only add latency. */
     GPU_DMA_SRC  = _gpu_batch_dma_addr;
     GPU_DMA_LEN  = submit_words;
     GPU_DMA_KICK = 1;
@@ -612,13 +646,18 @@ static inline void _gpu_ring_ensure(uint32_t bytes) {
     _gpu_wait_dma_idle_debug();
 
     {
+        /* Bounded like of_gpu_wait: if the GPU stops draining the ring
+         * (starved bus, wedged pipeline), the old unbounded spin froze
+         * the machine here silently — the ring fills within one frame,
+         * so a hang lands in this wait long before any fence wait. */
         uint32_t ring_spins = 0;
         do {
             ring_free = _gpu_ring_free_now();
             _gpu_note_ring_free(ring_free);
             if (ring_free >= bytes)
                 break;
-            ring_spins++;
+            if (++ring_spins == 50000000u)
+                __builtin_trap();  /* → fatal_trap dumps GPU state */
         } while (1);
         _gpu_dbg_ring_waits++;
         _gpu_dbg_ring_spin_iters += ring_spins;
@@ -1593,7 +1632,12 @@ typedef struct {
     uint8_t  colormap_id;
     uint8_t  z_mode;         /* OF_GPU_PARAM_Z_* */
 
-    int32_t  clamp_min[2];   /* s, t (0/0 = disabled, as 0x49) */
+    int32_t  clamp_min[2];   /* s, t (0/0 = disabled, as 0x49).
+                              * CONTRACT: min <= max per axis (signed
+                              * Q16.16); the HW clamp compares only the
+                              * top 16 bits, which matches the 32-bit
+                              * clamp ONLY under this ordering — behavior
+                              * is UNDEFINED for min > max. */
     int32_t  clamp_max[2];
 
     uint32_t z_base;
@@ -1621,6 +1665,11 @@ typedef struct {
      * clamp(texel*C + D) — C = per-vertex RGB565 (signed 5b/ch) in the normal
      * rgb[] words, D = the rgb_d[] triple on the 22-word 0x4E.  0 = legacy. */
     uint8_t  cd_combine;
+    /* Vert-tri vertex Y is Q12.4 subpixel instead of an integer scanline
+     * (control bit 31, INCLUDE_DIRECT_COLOR-gated; decoded as data[31] in
+     * gpu_core.v -> spanprod_subpix_y, consumed by gpu_edge_walker.v).
+     * 0 = legacy integer Y. */
+    uint8_t  subpix_y;
 } of_gpu_tri_state_t;
 
 /* 0x4A serves BOTH sticky-state consumers — 0x4B (HW plane derivation)
@@ -1652,7 +1701,8 @@ static inline void of_gpu_set_tri_state(const of_gpu_tri_state_t *st) {
                      | (((uint32_t)st->z_mode & 0x0Fu) << 24)
                      | ((uint32_t)(st->mirror_s & 1u) << 28)   /* G_TX_MIRROR S (ctl[28]) */
                      | ((uint32_t)(st->mirror_t & 1u) << 29)   /* G_TX_MIRROR T (ctl[29]) */
-                     | ((uint32_t)(st->cd_combine & 1u) << 30);/* texel*C+D combine (ctl[30]) */
+                     | ((uint32_t)(st->cd_combine & 1u) << 30) /* texel*C+D combine (ctl[30]) */
+                     | ((uint32_t)(st->subpix_y & 1u) << 31);  /* Q12.4 subpixel Y (ctl[31]) */
 
     /* 17-word 0x4A: word 16 carries the OF_GPU_SPAN_BLEND src alpha (RTL accepts
      * 16- or 17-word; const_alpha is ignored unless OF_GPU_SPAN_BLEND is set). */
@@ -1783,7 +1833,8 @@ static inline void of_gpu_draw_vert_tri_rgb(const int16_t x[3], const int16_t y[
     if (!of_has_feature(OF_HW_GPU_VERT_TRI) || !of_has_feature(OF_HW_GPU_VCOLOR))
         return;
 #endif
-    uint32_t n = rgb_d ? 22u : 19u;
+    uint32_t n = rgb_d ? 19u : 17u;  /* shrunk: dead q29 word dropped, 3 RGB565 packed -> 2 words */
+    (void)q29;                        /* q29 kept in the signature for ABI, no longer emitted */
     _gpu_cmd_header(GPU_CMD_DRAW_VERT_TRI_RGB, n);
     uint32_t *w = _gpu_ring_claim();
     *w++ = ((uint32_t)(uint16_t)y[0] << 16) | (uint16_t)x[0];
@@ -1792,11 +1843,11 @@ static inline void of_gpu_draw_vert_tri_rgb(const int16_t x[3], const int16_t y[
     *w++ = (uint32_t)s[0]; *w++ = (uint32_t)s[1]; *w++ = (uint32_t)s[2];
     *w++ = (uint32_t)t[0]; *w++ = (uint32_t)t[1]; *w++ = (uint32_t)t[2];
     *w++ = (uint32_t)zi[0]; *w++ = (uint32_t)zi[1]; *w++ = (uint32_t)zi[2];
-    *w++ = (uint32_t)rgb[0]; *w++ = (uint32_t)rgb[1]; *w++ = (uint32_t)rgb[2];
-    *w++ = q29;
+    /* w12-13: three RGB565 colours packed into 2 words (rgb1<<16|rgb0, then rgb2). */
+    *w++ = ((uint32_t)rgb[1] << 16) | (uint32_t)rgb[0]; *w++ = (uint32_t)rgb[2];
     *w++ = (uint32_t)depth[0]; *w++ = (uint32_t)depth[1]; *w++ = (uint32_t)depth[2];
-    /* w19-21: per-vertex additive D (RGB565) — only on the 22-word combine path. */
-    if (rgb_d) { *w++ = (uint32_t)rgb_d[0]; *w++ = (uint32_t)rgb_d[1]; *w++ = (uint32_t)rgb_d[2]; }
+    /* w17-18: per-vertex additive D (RGB565) packed 3->2 — only on the 19-word combine path. */
+    if (rgb_d) { *w++ = ((uint32_t)rgb_d[1] << 16) | (uint32_t)rgb_d[0]; *w++ = (uint32_t)rgb_d[2]; }
     _gpu_ring_commit(n);
 }
 
@@ -2002,7 +2053,8 @@ typedef struct {
     uint8_t  colormap_id;
     uint8_t  z_mode;
 
-    int32_t  clamp_min[2];
+    int32_t  clamp_min[2];   /* CONTRACT: min <= max per axis — see the
+                              * non-PC definition above */
     int32_t  clamp_max[2];
 
     uint32_t z_base;
@@ -2017,6 +2069,7 @@ typedef struct {
     uint8_t  mirror_s, mirror_t;
     uint8_t  const_alpha;
     uint8_t  cd_combine;
+    uint8_t  subpix_y;       /* Q12.4 subpixel vert-tri Y — see the non-PC definition above */
 } of_gpu_tri_state_t;
 
 static inline void     of_gpu_init(void)                                  {}

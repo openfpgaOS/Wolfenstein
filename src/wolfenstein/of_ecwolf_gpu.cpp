@@ -929,19 +929,20 @@ void OF_WolfGPU_Shutdown(void)
 
 void OF_WolfGPU_ApplyRefreshPolicy(void)
 {
-	of_analogizer_state_t analogizer;
-	const bool analogizerEnabled =
-		of_analogizer_state(&analogizer) == 0 && analogizer.enabled;
-	/* Match the Doom port's refresh policy:
-	 *  - Handheld LCD (no Analogizer): VTOTAL_AUTO -> kernel VRR.  The LCD can
-	 *    vary its refresh, so the OS adapts it to the app's present cadence,
-	 *    which minimizes the 70 Hz-sim / fixed-panel beat and display latency.
-	 *  - Analogizer analog output (CRT/scaler): fixed VTOTAL_60HZ.  Analog sinks
-	 *    need stable, standards-compliant timing, so VRR must be off there. */
-	const uint32_t vtotal = analogizerEnabled ?
-		OF_VIDEO_VTOTAL_60HZ : OF_VIDEO_VTOTAL_AUTO;
-
-	of_video_set_refresh_vtotal(vtotal);
+	/* Fixed 60 Hz on every sink, including the handheld LCD.  VTOTAL_AUTO
+	 * (kernel adaptive VRR) is wrong for this app: the play loop is a pure
+	 * vsync FOLLOWER (render-one-ahead paced by the flip fence), so the
+	 * kernel adapting the refresh to the app's present cadence is a follower
+	 * following a follower -- nothing anchors 60 Hz.  The kernel's +/-1-line
+	 * trend nudge then self-sustains: one ~16 us second-difference in
+	 * acquire timing (sound loads, fence spin) seeds a 1-line/frame drift
+	 * that ratchets anywhere in the 61..42 Hz clamp range, sagging the mean
+	 * display period (more LCD hold smear) and forcing the render
+	 * interpolator's phase clamp to snap (~13 px single-frame view jumps at
+	 * run-turn, every few seconds -- perceived as blur/stutter while
+	 * turning).  The interpolator already converts the 70 Hz sim to the
+	 * MEASURED present period, so a fixed panel rate costs nothing. */
+	of_video_set_refresh_vtotal(OF_VIDEO_VTOTAL_60HZ);
 }
 
 void OF_WolfGPU_ResetVideoFrames(void)

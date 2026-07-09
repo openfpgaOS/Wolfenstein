@@ -83,8 +83,8 @@ ControlScheme controlScheme[] =
 	{ bt_turnleft,			"Turn Left",	JoyAx(3),	sc_LeftArrow,	-1, offsetof(TicCmd_t, controlx), 1 },
 	{ bt_turnright,			"Turn Right",	JoyAx(3)+1,	sc_RightArrow,	-1, offsetof(TicCmd_t, controlx), 0 },
 	{ bt_attack,			"Attack",		0,			sc_Control,		0,  CS_AxisDigital, 0},
-	{ bt_strafe,			"Strafe",		3,			sc_Alt,			-1, CS_AxisDigital, 0 },
-	{ bt_run,				"Run",			2,			sc_LShift,		-1, CS_AxisDigital, 0 },
+	{ bt_strafe,			"Strafe",		10,			sc_Alt,			-1, CS_AxisDigital, 0 },
+	{ bt_run,				"Run",			9,			sc_LShift,		-1, CS_AxisDigital, 0 },
 	{ bt_use,				"Use",			1,			sc_Space,		-1, CS_AxisDigital, 0 },
 	{ bt_slot1,				"Slot 1",		-1,			sc_1,			-1, CS_AxisDigital, 0 },
 	{ bt_slot2,				"Slot 2", 		-1,			sc_2,			-1, CS_AxisDigital, 0 },
@@ -96,12 +96,12 @@ ControlScheme controlScheme[] =
 	{ bt_slot8,				"Slot 8",		-1,			sc_8,			-1, CS_AxisDigital, 0 },
 	{ bt_slot9,				"Slot 9",		-1,			sc_9,			-1, CS_AxisDigital, 0 },
 	{ bt_slot0,				"Slot 0",		-1,			sc_0,			-1, CS_AxisDigital, 0 },
-	{ bt_nextweapon,		"Next Weapon",	4,			-1,				-1, CS_AxisDigital, 0 },
-	{ bt_prevweapon,		"Prev Weapon",	5, 			-1,				-1, CS_AxisDigital, 0 },
+	{ bt_nextweapon,		"Next Weapon",	3,			-1,				-1, CS_AxisDigital, 0 },
+	{ bt_prevweapon,		"Prev Weapon",	2, 			-1,				-1, CS_AxisDigital, 0 },
 	{ bt_altattack,			"Alt Attack",	-1,			-1,				-1, CS_AxisDigital, 0 },
 	{ bt_reload,			"Reload",		-1,			-1,				-1, CS_AxisDigital, 0 },
 	{ bt_zoom,				"Zoom",			-1,			-1,				-1, CS_AxisDigital, 0 },
-	{ bt_automap,			"Automap",		-1,			-1,				-1, CS_AxisDigital, 0 },
+	{ bt_automap,			"Automap",		4,			-1,				-1, CS_AxisDigital, 0 },
 	{ bt_showstatusbar,		"Show Status",	-1,			sc_Tab,			-1,	CS_AxisDigital, 0 },
 	{ bt_pause,				"Pause",		-1,			sc_Pause,		-1, CS_AxisDigital, 0 },
 	{ bt_esc,				"Main Menu",	-1,			-1,				-1, CS_AxisDigital, 0 },
@@ -218,6 +218,12 @@ int32_t GetTimeCount()
  * while enabled.  Set to 0 to restore 70 Hz catch-up + interpolation. */
 #define OF_WOLF_DIAG_ONE_TIC 0
 
+/* Frame-timing diagnostic in PlayFrame: 4 timer service calls per frame plus
+ * a ~130-char console printf every 128 frames -- the printf is a blocking
+ * write that lands as a periodic hitch, so compile it in only when actively
+ * profiling. */
+#define OF_WOLF_DIAG_FRAME_PERF 0
+
 static void UseCurrentRenderTime()
 {
 	renderfraction = FRACUNIT;
@@ -274,6 +280,14 @@ static void UpdateRenderInterpolation()
 	else
 		advance = (FRACUNIT * TICRATE + 30) / 60;   /* ~70/60 */
 	phase += advance - ticstep;
+	/* Gentle proportional pull toward mid-interval: any sustained mismatch
+	 * between the measured present period and the tic clock (display-rate
+	 * drift, EMA lag, integer bias) otherwise accumulates in phase until the
+	 * gross-drift snap below fires -- a one-frame ~1-tic view jump.  The pull
+	 * bleeds at most FRACUNIT/64 per frame (~0.016 tic = ~0.2 px at run-turn,
+	 * far below the fine-angle quantization dither), so smooth motion is
+	 * unaffected while slow drift can never reach the clamp. */
+	phase += (FRACUNIT / 2 - phase) >> 6;
 	/* Bounded extrapolation either side of the snapshot interval keeps motion
 	 * linear across tic boundaries; snap to mid-interval only on gross drift (a
 	 * long stall or a refresh/sim-rate change) so phase can't run off. */
@@ -1280,7 +1294,7 @@ void FinishPaletteShifts (void)
 
 void PlayFrame()
 {
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if OF_WOLF_DIAG_FRAME_PERF && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	const uint64_t ofpgaDiagFrameStart = GetTimeUS();
 #endif
 	UpdateRenderInterpolation();
@@ -1289,7 +1303,7 @@ void PlayFrame()
 	uint32_t perfStart = OF_WolfPerf_NowUS();
 	ThreeDRefresh ();
 	OF_WolfPerf_Add(OF_WOLF_PERF_RENDER, perfStart);
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if OF_WOLF_DIAG_FRAME_PERF && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	const uint64_t ofpgaDiagRenderEnd = GetTimeUS();
 #endif
 
@@ -1378,11 +1392,11 @@ void PlayFrame()
 	 * means the next frame's input poll, simulation and interpolation
 	 * timestamps are all taken on a fresh post-vsync time base instead of
 	 * being skewed by a mid-frame stall inside the renderer. */
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if OF_WOLF_DIAG_FRAME_PERF && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	const uint64_t ofpgaDiagPresentStart = GetTimeUS();
 #endif
 	VH_UpdateScreen(true);
-#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+#if OF_WOLF_DIAG_FRAME_PERF && defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	{
 		const uint64_t ofpgaDiagFrameEnd = GetTimeUS();
 		static uint64_t accPeriod = 0, accRender = 0, accOverlay = 0,
@@ -1470,7 +1484,12 @@ void PlayLoop (void)
 		perfStart = OF_WolfPerf_NowUS();
 		for (unsigned int i = 0;i < tics;++i)
 		{
-			if(!Paused)
+			// The old-position snapshot feeds only the renderer's
+			// interpolation AFTER the tic loop, so in a catch-up batch only
+			// the snapshot before the LAST tic is ever observed -- skip the
+			// earlier whole-actor-list walks.  Early aborts (death, exit
+			// specials, demo end) are handled at the break below.
+			if(!Paused && i == tics - 1)
 			{
 				const uint32_t snapshotStart = OF_WolfPerf_NowUS();
 				AActor::SnapshotRenderStates();
@@ -1481,9 +1500,21 @@ void PlayLoop (void)
 			PollControls(!i);
 			OF_WolfPerf_Add(OF_WOLF_PERF_SIM_CONTROLS, ticPartStart);
 
-			// Net code may require this loop to abort early
+			// The loop can abort early: net code, but also single player
+			// (death during thinkers, exit specials, demo end).  If the
+			// last-tic snapshot hasn't run for this batch, take it now so
+			// the transition frame renders exact current positions instead
+			// of interpolating against a stale batch (matches the old
+			// per-tic snapshot behavior).
 			if(playstate != ex_stillplaying)
+			{
+				if(!Paused && i != tics - 1)
+				{
+					AActor::SnapshotRenderStates();
+					SnapshotPlayerRenderStates();
+				}
 				break;
+			}
 
 			if(!Paused)
 			{

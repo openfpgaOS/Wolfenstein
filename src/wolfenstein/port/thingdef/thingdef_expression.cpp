@@ -285,6 +285,34 @@ ExpressionNode::~ExpressionNode()
 	}
 }
 
+// Mirrors Evaluate's structure: a node folds when its leaves are literals or
+// named DECORATE constants (ConstantSymbol) -- function symbols (random and
+// friends) and actor-variable symbols do not.
+bool ExpressionNode::IsConstant() const
+{
+	if(term[0] == NULL)
+	{
+		if(type == CONSTANT)
+		{
+			// Constant leaf.
+		}
+		else if(type == SYMBOL)
+		{
+			if(symbol == NULL || symbol->IsFunction() || !symbol->IsConstant())
+				return false;
+		}
+		else
+			return false;
+	}
+	else if(!term[0]->IsConstant())
+		return false;
+
+	if(op->operands > 1 && term[1] != NULL)
+		return term[1]->IsConstant();
+
+	return true;
+}
+
 const ExpressionNode::Value &ExpressionNode::Evaluate(AActor *self)
 {
 	if(term[0] == NULL)

@@ -114,6 +114,9 @@ class Symbol
 		FName			GetName() const { return name; }
 		const Type		*GetType() const { return type.GetType(); }
 		virtual bool	IsArray() const { return false; }
+		// True when FillValue ignores self and always yields the same value
+		// (i.e. a named DECORATE constant) -- enables parse-time folding.
+		virtual bool	IsConstant() const { return false; }
 		virtual bool	IsFunction() const { return false; }
 	protected:
 		FName			name;
@@ -129,6 +132,7 @@ class ConstantSymbol : public Symbol
 		{
 			val = this->val;
 		}
+		bool IsConstant() const { return true; }
 	protected:
 		ExpressionNode::Value	val;
 };

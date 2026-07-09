@@ -210,11 +210,72 @@ void IN_GetJoyDelta(int *dx,int *dy)
 	*dy = y;
 }
 
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+// The kernel input snapshot only changes when SDL_PollEvent polls it (once
+// per frame, in IN_ProcessEvents), but the play loop re-reads every button
+// and axis for every sim tic (up to MAXTICS per frame) and every
+// controlScheme entry -- ~54 service calls per tic returning identical
+// bytes.  Cache the whole pad state on first read after each event pump;
+// IN_ProcessEvents invalidates.
+static bool ofJoyCacheValid = false;
+static bool ofJoyCachedStart = false;
+static int ofJoyCachedButtons = 0;
+static int ofJoyCachedAxes = 0;
+static SWORD ofJoyCachedAxis[SDL_CONTROLLER_AXIS_MAX];
+
+static void OFJoyInvalidateCache()
+{
+	ofJoyCacheValid = false;
+}
+
+static void OFJoyRefreshCache()
+{
+	SDL_GameControllerUpdate();
+
+	ofJoyCachedButtons = 0;
+	ofJoyCachedStart = false;
+	for(int i = 0; i < JoyNumButtons; ++i)
+	{
+		if(SDL_GameControllerGetButton(GameController, (SDL_GameControllerButton)i))
+		{
+			if(i == SDL_CONTROLLER_BUTTON_START)
+				ofJoyCachedStart = true;
+			else
+				ofJoyCachedButtons |= 1<<i;
+		}
+	}
+
+	ofJoyCachedAxes = 0;
+	for(int i = 0; i < JoyNumAxes && i < SDL_CONTROLLER_AXIS_MAX; ++i)
+	{
+		const SWORD pos = SDL_GameControllerGetAxis(GameController,
+			(SDL_GameControllerAxis)GameControllerAxisMap[i]);
+		ofJoyCachedAxis[i] = pos;
+		if(pos <= -0x1000)
+			ofJoyCachedAxes |= 1 << (i*2);
+		else if(pos >= 0x1000)
+			ofJoyCachedAxes |= 1 << (i*2+1);
+	}
+
+	ofJoyCacheValid = true;
+}
+#endif
+
 int IN_GetJoyAxis(int axis)
 {
 #if SDL_VERSION_ATLEAST(2,0,0)
 	if(GameController)
+	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		if(axis >= 0 && axis < JoyNumAxes && axis < SDL_CONTROLLER_AXIS_MAX)
+		{
+			if(!ofJoyCacheValid)
+				OFJoyRefreshCache();
+			return ofJoyCachedAxis[axis];
+		}
+#endif
 		return SDL_GameControllerGetAxis(GameController, GameControllerAxisMap[axis]);
+	}
 #endif
 	return SDL_JoystickGetAxis(Joystick, axis);
 }
@@ -232,6 +293,14 @@ int IN_JoyButtons()
 #if SDL_VERSION_ATLEAST(2,0,0)
 	if(GameController)
 	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		if(!ofJoyCacheValid)
+			OFJoyRefreshCache();
+		// Preserve the original per-call START side effect.
+		if(ofJoyCachedStart)
+			control[ConsolePlayer].buttonstate[bt_esc] = true;
+		return ofJoyCachedButtons;
+#else
 		SDL_GameControllerUpdate();
 
 		int res = 0;
@@ -248,6 +317,7 @@ int IN_JoyButtons()
 			}
 		}
 		return res;
+#endif
 	}
 #endif
 
@@ -281,6 +351,11 @@ int IN_JoyAxes()
 #if SDL_VERSION_ATLEAST(2,0,0)
 	if(GameController)
 	{
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		if(!ofJoyCacheValid)
+			OFJoyRefreshCache();
+		return ofJoyCachedAxes;
+#else
 		SDL_GameControllerUpdate();
 		int res = 0;
 		for(int i = 0; i < JoyNumAxes; ++i)
@@ -292,6 +367,7 @@ int IN_JoyAxes()
 				res |= 1 << (i*2+1);
 		}
 		return res;
+#endif
 	}
 #endif
 	if(!Joystick) return 0;
@@ -570,6 +646,12 @@ void IN_ProcessEvents()
 	{
 		processEvent(&event);
 	}
+
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+	// The event pump is the only place the kernel pad snapshot refreshes;
+	// drop the per-frame cache so the next read picks up the new state.
+	OFJoyInvalidateCache();
+#endif
 }
 
 

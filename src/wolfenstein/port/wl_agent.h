@@ -22,6 +22,16 @@ void    RebuildActorCollisionGrid ();
 void    UnlinkActorCollision (class AActor *ob);
 bool    ActorBlocksSpot (class AActor *ob, unsigned int x, unsigned int y);
 void    TouchActorsNear (class AActor *ob);
+// Enumerate a SUPERSET of the actors whose center can lie within `reach` of
+// (x, y) via the per-tic collision grid (callers re-apply their own
+// predicate).  The callback returns false to stop early; it may destroy the
+// actor it is given.  Returns false when no grid is available yet -- the
+// caller must then fall back to a full actor-list scan.  Caveat shared with
+// TouchActorsNear/ActorBlocksSpot: actors spawned after this tic's grid
+// rebuild are not visible until the next rebuild (vanilla never spawns
+// solid/shootable actors mid-tic; mods could).
+bool    EnumerateActorsNear (fixed x, fixed y, fixed reach,
+                             bool (*callback)(class AActor *check, void *ctx), void *ctx);
 // Flat per-tile solidity classification rebuilt each tic alongside the
 // collision grid: 0 = empty, 1 = blocked from every direction, 2 = consult
 // the MapSpot (doors / sliding walls).  NULL when no tic has run yet.

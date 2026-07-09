@@ -614,8 +614,9 @@ void AActor::SetState(const Frame *state, bool norun)
 
 #if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
 	// A state change means there may be work to do again -- wake the actor
-	// if it had gone dormant (see AActor::Tick).
-	ofThinkDormant = false;
+	// if it had gone dormant (relinking it into the tick list if it was
+	// diverted to the dormant side list; see ThinkerList::Tick).
+	WakeFromDormancy();
 #endif
 
 	this->state = state;

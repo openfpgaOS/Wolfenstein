@@ -75,12 +75,25 @@ extern class ThinkerList
 		friend class Thinker;
 		void	Register(Thinker *thinker, Priority type=NORMAL);
 		void	Deregister(Thinker *thinker);
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		void	MoveToDormant(Thinker *thinker);
+		void	WakeDormant(Thinker *thinker);
+#endif
 
 	private:
 		// nxetThinker allows us to skip over thinkers that we were about to
 		// think, but end up being destroyed.
 		Iterator					nextThinker;
 		EmbeddedList<Thinker>::List	thinkers[NUM_TYPES];
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+		// Dormant NORMAL-priority thinkers (static decorations, idle pickups,
+		// corpses) live here instead of thinkers[NORMAL], so the per-tic walk
+		// never even visits them -- the original Wolf3D never had static
+		// objects in the think chain.  Invariant: a thinker is in this list
+		// exactly when (ofThinkDormant && thinkerPriority == NORMAL); other
+		// priorities keep the old flag-skip behavior.
+		EmbeddedList<Thinker>::List	dormant;
+#endif
 } thinkerList;
 
 class Thinker : public DObject, public EmbeddedList<Thinker>::Node
@@ -107,6 +120,19 @@ class Thinker : public DObject, public EmbeddedList<Thinker>::Node
 		// infinite-duration frame with no per-tic thinker, so the tick loop
 		// can skip it -- the original Wolf3D didn't tick static objects.
 		bool			ofThinkDormant;
+
+		// Clear dormancy on a state change; if the thinker was diverted to
+		// the dormant side list, relink it into its tick list.
+		void			WakeFromDormancy()
+		{
+			if(ofThinkDormant)
+			{
+				ofThinkDormant = false;
+#if defined(OF_ECWOLF_OPENFPGA) && !defined(OF_PC)
+				thinkerList.WakeDormant(this);
+#endif
+			}
+		}
 
 	private:
 		friend class ThinkerList;

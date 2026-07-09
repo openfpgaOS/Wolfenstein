@@ -386,6 +386,11 @@ static TArray<unsigned char> simTileFlags;
 // outlier made every TryMove scan most of the map).  They go in this side
 // list instead and are checked linearly -- there are at most a handful.
 static TArray<AActor *> collisionGridOversized;
+// Distinct cells occupied by the previous build: clearing just these
+// replaces the per-tic 16KB whole-grid memset, which streamed half the
+// D-cache out immediately before the thinker walk re-touched the same
+// actor objects.
+static TArray<int> collisionGridUsedCells;
 static int collisionGridW = 0, collisionGridH = 0;
 static fixed collisionGridMaxRadius = 0;
 static const GameMap *collisionGridMap = NULL;
@@ -432,10 +437,27 @@ void RebuildActorCollisionGrid ()
 	const int w = (int)map->GetHeader().width;
 	const int h = (int)map->GetHeader().height;
 	const unsigned int cells = (unsigned int)w * (unsigned int)h;
+	bool fullClear = collisionGridMap != map ||
+		collisionGridW != w || collisionGridH != h;
 	if(collisionGrid.Size() < cells)
+	{
 		collisionGrid.Resize(cells);
-	if(cells > 0)
-		memset(&collisionGrid[0], 0, collisionGrid.Size() * sizeof(AActor *));
+		fullClear = true;
+	}
+	if(fullClear)
+	{
+		if(cells > 0)
+			memset(&collisionGrid[0], 0, collisionGrid.Size() * sizeof(AActor *));
+	}
+	else
+	{
+		// Same map, same geometry: only the cells occupied last build can
+		// be non-NULL (destroyed actors unlink in place, and stale heads
+		// are covered because the list is independent of the actor walk).
+		for(unsigned int i = 0;i < collisionGridUsedCells.Size();++i)
+			collisionGrid[collisionGridUsedCells[i]] = NULL;
+	}
+	collisionGridUsedCells.Clear();
 
 	collisionGridW = w;
 	collisionGridH = h;
@@ -462,6 +484,8 @@ void RebuildActorCollisionGrid ()
 
 		const int cell = ty * w + tx;
 		actor->collisionCell = cell;
+		if(collisionGrid[cell] == NULL)
+			collisionGridUsedCells.Push(cell); // first occupant: track once
 		actor->collisionNext = collisionGrid[cell];
 		collisionGrid[cell] = actor;
 
@@ -695,6 +719,57 @@ void TouchActorsNear (AActor *ob)
 	}
 }
 
+// Generic near-query on the per-tic grid for callers outside this file
+// (T_Projectile, A_Dormant -- both used to scan the whole actor list).  The
+// window is padded by the largest gridded radius plus one tile so build-time
+// cell staleness (floor rounding, intra-tic movement) cannot drop a
+// candidate; the callback re-applies the caller's exact predicate, so
+// results match the full scan.  The chain pointer is read before the
+// callback runs, mirroring TouchActorsNear's destroy-safety.
+bool EnumerateActorsNear (fixed x, fixed y, fixed reach,
+                          bool (*callback)(AActor *check, void *ctx), void *ctx)
+{
+	if(collisionGridMap != map || collisionGridW <= 0)
+		return false;
+
+	const fixed pad = reach + collisionGridMaxRadius + TILEGLOBAL;
+	int cxl = (x - pad) >> TILESHIFT;
+	int cyl = (y - pad) >> TILESHIFT;
+	int cxh = (x + pad) >> TILESHIFT;
+	int cyh = (y + pad) >> TILESHIFT;
+	if(cxl < 0) cxl = 0;
+	if(cyl < 0) cyl = 0;
+	if(cxh >= collisionGridW) cxh = collisionGridW - 1;
+	if(cyh >= collisionGridH) cyh = collisionGridH - 1;
+
+	for (int cy = cyl;cy <= cyh;cy++)
+	{
+		for (int cx = cxl;cx <= cxh;cx++)
+		{
+			AActor *check = collisionGrid[cy * collisionGridW + cx];
+			while(check != NULL)
+			{
+				AActor * const next = check->collisionNext;
+				if(!callback(check, ctx))
+					return true;
+				check = next;
+			}
+		}
+	}
+
+	for(unsigned int i = 0;i < collisionGridOversized.Size();)
+	{
+		AActor * const check = collisionGridOversized[i];
+		const unsigned int sizeBefore = collisionGridOversized.Size();
+		if(!callback(check, ctx))
+			return true;
+		if(collisionGridOversized.Size() == sizeBefore)
+			++i;
+	}
+
+	return true;
+}
+
 static bool TryMove (AActor *ob)
 {
 	if (noclip)
@@ -715,10 +790,21 @@ static bool TryMove (AActor *ob)
 	//
 	// check for solid walls
 	//
+	int stfw = 0, stfh = 0;
+	const unsigned char *stflags = SimTileFlags(&stfw, &stfh);
 	for (y=yl;y<=yh;y++)
 	{
 		for (x=xl;x<=xh;x++)
 		{
+			// Fast path: the dense solidity byte answers the overwhelmingly
+			// common case (open floor, i.e. spot->tile == NULL, where the
+			// body below does nothing) without fetching the fat MapSpot.
+			// Any nonzero class falls through to the spot so the pushwall
+			// and slide edge math below is untouched.
+			if(stflags && x >= 0 && y >= 0 && x < stfw && y < stfh &&
+				stflags[y * stfw + x] == 0)
+				continue;
+
 			const bool checkLines[4] =
 			{
 				(ob->x+ob->radius) > ((x+1)<<TILESHIFT),

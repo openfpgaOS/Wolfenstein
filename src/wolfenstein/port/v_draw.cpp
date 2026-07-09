@@ -1213,8 +1213,19 @@ void DCanvas::FillSimplePoly(FTexture *tex, FVector2 *points, int npoints,
 		return;
 	}
 
+	// R_DrawSpan (the textured branch below) writes via the global dc_destorg,
+	// which is initialised once at mode-set (R_SetupBuffer, id_vl.cpp) and then
+	// left pinned to that single physical buffer.  With the OpenFPGA rotating GPU
+	// triple-buffer that address no longer matches the current draw buffer, so the
+	// textured automap tiles land in a stale buffer and only reach the LCD on the
+	// frames the rotation happens to line up -- the automap "map layout flashing".
+	// Retarget dc_destorg at this canvas's live buffer for the span loop (the same
+	// save/restore idiom DrawTextureParms uses).  The flat-colour and Clear paths
+	// already draw through this->Buffer, which is why the grey background is solid.
+	BYTE *destorgsave = dc_destorg;
 	if(tex)
 	{
+		dc_destorg = this->Buffer;
 		scalex /= FIXED2FLOAT(tex->xScale);
 		scaley /= FIXED2FLOAT(tex->yScale);
 
@@ -1319,6 +1330,7 @@ void DCanvas::FillSimplePoly(FTexture *tex, FVector2 *points, int npoints,
 		pt1 = pt2;
 		pt2--;			if (pt2 < 0) pt2 = npoints;
 	} while (pt1 != botpt);
+	dc_destorg = destorgsave;
 #endif
 }
 

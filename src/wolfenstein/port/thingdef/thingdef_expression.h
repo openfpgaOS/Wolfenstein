@@ -66,6 +66,9 @@ class ExpressionNode
 		~ExpressionNode();
 
 		const Value &Evaluate(AActor *self);
+		// True when Evaluate(NULL) is valid and always yields the same value
+		// (literals, named constants, and operators over them).
+		bool IsConstant() const;
 		//void	DumpExpression(std::stringstream &out, std::string endLabel=std::string()) const;
 
 		static ExpressionNode	*ParseExpression(const ClassDef *cls, TypeHierarchy &types, Scanner &sc, ExpressionNode *root=NULL, unsigned char opLevel=255);

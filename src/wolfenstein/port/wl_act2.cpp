@@ -65,10 +65,13 @@ void A_Face(AActor *self, AActor *target, angle_t maxturn)
 	if (!target)
 		return;
 
-	double angle = atan2 ((double) (target->x - self->x), (double) (target->y - self->y));
+	// atan2f, not atan2: rv32imafc has hardware single precision only, and
+	// this runs on every enemy attack event.  Worst error is a few hundred
+	// angle_t units (~1e-5 degrees) -- far below perceptibility.
+	float angle = atan2f ((float) (target->x - self->x), (float) (target->y - self->y));
 	if (angle<0)
-		angle = (M_PI*2+angle);
-	angle_t iangle = (angle_t) (angle*ANGLE_180/M_PI) - ANGLE_90;
+		angle = (float) (M_PI*2) + angle;
+	angle_t iangle = (angle_t) (angle*(float)(ANGLE_180/M_PI)) - ANGLE_90;
 
 	if(maxturn > 0 && maxturn < self->angle - iangle)
 	{
@@ -212,6 +215,68 @@ void T_ExplodeProjectile(AActor *self, AActor *target)
 		self->Destroy();
 }
 
+struct ProjectileScanContext
+{
+	AActor *self;
+	AActor *lastHit; // For ripping, so we only hit an actor once per tic
+	bool playermissile;
+	bool exploded;
+};
+
+// Per-candidate hit logic, shared by the collision-grid window and the
+// no-grid fallback scan.  Returns false to stop scanning (the projectile
+// exploded).
+static bool ProjectileCheckActor (AActor *check, void *ctxp)
+{
+	ProjectileScanContext &ctx = *static_cast<ProjectileScanContext *>(ctxp);
+	AActor * const self = ctx.self;
+
+	if(check == self)
+		return true;
+
+	// Pass through allies
+	if(ctx.playermissile)
+	{
+		if(check->player)
+			return true;
+	}
+	else
+	{
+		if(check->flags & FL_ISMONSTER)
+			return true;
+	}
+
+	if((check->flags & (FL_SHOOTABLE|FL_SOLID)) && ctx.lastHit != check)
+	{
+		fixed deltax = abs(self->x - check->x);
+		fixed deltay = abs(self->y - check->y);
+		fixed radius = check->radius + self->radius;
+		if(deltax < radius && deltay < radius)
+		{
+			ctx.lastHit = check;
+			if(check->flags & FL_SHOOTABLE)
+			{
+				DamageActor(check, self->target, self->GetDamage());
+
+				if(!(self->flags & FL_RIPPER) || (check->flags & FL_DONTRIP))
+				{
+					T_ExplodeProjectile(self, check);
+					ctx.exploded = true;
+					return false;
+				}
+			}
+			// Eventually this will need an actual height check.
+			else if(check->projectilepassheight != 0)
+			{
+				T_ExplodeProjectile(self, check);
+				ctx.exploded = true;
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
 void T_Projectile (AActor *self)
 {
 	int steps = 1;
@@ -233,7 +298,8 @@ void T_Projectile (AActor *self)
 		movey /= steps;
 	}
 
-	AActor *lastHit = NULL; // For ripping, so we only hit an actor once per tic
+	ProjectileScanContext ctx = { self, NULL,
+		self->target && self->target->player, false };
 	do
 	{
 		self->x += movex;
@@ -245,53 +311,24 @@ void T_Projectile (AActor *self)
 			return;
 		}
 
-		const bool playermissile = self->target && self->target->player;
-		AActor::Iterator iter = AActor::GetIterator();
-		while(iter.Next())
+		// Hit detection used to walk the whole actor list once per movement
+		// step -- the same pattern MoveObj/TrySpot lost to the per-tic
+		// collision grid.  The grid window follows the stepped position and
+		// ProjectileCheckActor re-applies the identical predicate.
+		if(!EnumerateActorsNear(self->x, self->y, self->radius,
+		                        ProjectileCheckActor, &ctx))
 		{
-			AActor *check = iter;
-			if(check == self)
-				continue;
-
-			// Pass through allies
-			if(playermissile)
+			// No grid yet: original full scan.
+			AActor::Iterator iter = AActor::GetIterator();
+			while(iter.Next())
 			{
-				if(check->player)
-					continue;
-			}
-			else
-			{
-				if(check->flags & FL_ISMONSTER)
-					continue;
-			}
-
-			if((check->flags & (FL_SHOOTABLE|FL_SOLID)) && lastHit != check)
-			{
-				fixed deltax = abs(self->x - check->x);
-				fixed deltay = abs(self->y - check->y);
-				fixed radius = check->radius + self->radius;
-				if(deltax < radius && deltay < radius)
-				{
-					lastHit = check;
-					if(check->flags & FL_SHOOTABLE)
-					{
-						DamageActor(check, self->target, self->GetDamage());
-
-						if(!(self->flags & FL_RIPPER) || (check->flags & FL_DONTRIP))
-						{
-							T_ExplodeProjectile(self, check);
-							return;
-						}
-					}
-					// Eventually this will need an actual height check.
-					else if(check->projectilepassheight != 0)
-					{
-						T_ExplodeProjectile(self, check);
-						return;
-					}
-				}
+				AActor *check = iter;
+				if(!ProjectileCheckActor(check, &ctx))
+					break;
 			}
 		}
+		if(ctx.exploded)
+			return;
 	}
 	while(--steps);
 }
@@ -336,14 +373,16 @@ ACTION_FUNCTION(A_CustomMissile)
 	fixed newy = self->y + spawnoffset*finecosine[self->angle>>ANGLETOFINESHIFT]/64;
 
 	angle_t iangle;
-	if(!(flags & CMF_AIMDIRECTION) && self->target)
+	AActor * const aimtarget = self->target; // one read barrier, not four
+	if(!(flags & CMF_AIMDIRECTION) && aimtarget)
 	{
-		double angle = (flags & CMF_AIMOFFSET) ?
-			atan2 ((double) (self->y - self->target->y), (double) (self->target->x - self->x)) :
-			atan2 ((double) (newy - self->target->y), (double) (self->target->x - newx));
+		// Single-precision on purpose; see A_Face.
+		float angle = (flags & CMF_AIMOFFSET) ?
+			atan2f ((float) (self->y - aimtarget->y), (float) (aimtarget->x - self->x)) :
+			atan2f ((float) (newy - aimtarget->y), (float) (aimtarget->x - newx));
 		if (angle<0)
-			angle = (M_PI*2+angle);
-		iangle = (angle_t) (angle*ANGLE_180/M_PI) + (angle_t) ((angleOffset*ANGLE_45)/45);
+			angle = (float) (M_PI*2) + angle;
+		iangle = (angle_t) (angle*(float)(ANGLE_180/M_PI)) + (angle_t) ((angleOffset*ANGLE_45)/45);
 	}
 	else
 		iangle = self->angle;
@@ -373,6 +412,30 @@ ACTION_FUNCTION(A_CustomMissile)
 ===============
 */
 
+struct DormantScanContext
+{
+	AActor *self;
+	bool blocked;
+};
+
+static bool DormantCheckActor (AActor *actor, void *ctxp)
+{
+	DormantScanContext &ctx = *static_cast<DormantScanContext *>(ctxp);
+	AActor * const self = ctx.self;
+
+	if(actor == self || !(actor->flags&(FL_SHOOTABLE|FL_SOLID)))
+		return true;
+
+	fixed radius = self->radius + actor->radius;
+	if(abs(self->x - actor->x) < radius &&
+		abs(self->y - actor->y) < radius)
+	{
+		ctx.blocked = true;
+		return false;
+	}
+	return true;
+}
+
 ACTION_FUNCTION(A_Dormant)
 {
 	enum
@@ -383,18 +446,23 @@ ACTION_FUNCTION(A_Dormant)
 	ACTION_PARAM_STATE(state, 0, NULL);
 	ACTION_PARAM_INT(flags, 1);
 
-	AActor::Iterator iter = AActor::GetIterator();
-	while(iter.Next())
+	// Only nearby actors can overlap: collision-grid window instead of the
+	// whole-actor-list scan (identical predicate via DormantCheckActor).
+	DormantScanContext ctx = { self, false };
+	if(!EnumerateActorsNear(self->x, self->y, self->radius,
+	                        DormantCheckActor, &ctx))
 	{
-		AActor *actor = iter;
-		if(actor == self || !(actor->flags&(FL_SHOOTABLE|FL_SOLID)))
-			continue;
-
-		fixed radius = self->radius + actor->radius;
-		if(abs(self->x - actor->x) < radius &&
-			abs(self->y - actor->y) < radius)
-			return false;
+		// No grid yet: original full scan.
+		AActor::Iterator iter = AActor::GetIterator();
+		while(iter.Next())
+		{
+			AActor *actor = iter;
+			if(!DormantCheckActor(actor, &ctx))
+				break;
+		}
 	}
+	if(ctx.blocked)
+		return false;
 
 	self->flags |= FL_AMBUSH | FL_SHOOTABLE | FL_SOLID;
 	self->flags &= ~(FL_ATTACKMODE|FL_COUNTKILL);
@@ -506,18 +574,25 @@ ACTION_FUNCTION(A_Chase)
 	bool	dodge = !(flags & CHF_DONTDODGE);
 	bool	pathing = (self->flags & FL_PATHING) ? true : false;
 
+	// self->target is a TObjPtr whose every read runs the GC read barrier;
+	// this function reads it up to a dozen times per tic, so cache the raw
+	// pointer once (refreshed after anything that can retarget).  Nothing in
+	// here can destroy a player pawn, so the cached pointer stays valid.
+	AActor *target = NULL;
 	if(!pathing)
 	{
-		if(self->target == NULL)
+		target = self->target;
+		if(target == NULL)
 		{
 			// Auto select player to target. ZDoom tries to sight for a target and
 			// if it doesn't find one switches to idle. Wolf3D, however, never had
 			// explicit targets so the player was assumed to always be targeted.
 			self->target = players[pr_chase()%Net::InitVars.numPlayers].mo;
-			assert(self->target);
+			target = self->target;
+			assert(target);
 		}
 
-		if(self->target->health <= 0 || !(self->target->flags & FL_SHOOTABLE))
+		if(target->health <= 0 || !(target->flags & FL_SHOOTABLE))
 		{
 			// Target is no longer valid so find a new one
 			if (!SightPlayer (self, 0, 0, 0, 180, NULL))
@@ -527,6 +602,7 @@ ACTION_FUNCTION(A_Chase)
 				self->flags &= ~(FL_ATTACKMODE|FL_FIRSTATTACK);
 				return true;
 			}
+			target = self->target; // SightPlayer retargeted us
 		}
 	}
 
@@ -550,16 +626,16 @@ ACTION_FUNCTION(A_Chase)
 
 	if(!pathing)
 	{
-		bool inMeleeRange = melee ? CheckMeleeRange(self, self->target, self->speed) : false;
+		bool inMeleeRange = melee ? CheckMeleeRange(self, target, self->speed) : false;
 
 		if(!inMeleeRange && missile)
 		{
 			dodge = false;
-			if ((self->IsFast() || self->movecount == 0) && CheckLine(self, self->target)) // got a shot at player?
+			if ((self->IsFast() || self->movecount == 0) && CheckLine(self, target)) // got a shot at player?
 			{
 				self->hidden = false;
-				dx = abs(self->tilex + dirdeltax[self->dir] - self->target->tilex);
-				dy = abs(self->tiley + dirdeltay[self->dir] - self->target->tiley);
+				dx = abs(self->tilex + dirdeltax[self->dir] - target->tilex);
+				dy = abs(self->tiley + dirdeltay[self->dir] - target->tiley);
 				dist = dx>dy ? dx : dy;
 				// If we only do ranged attacks, be more aggressive
 				if(!melee)
@@ -586,10 +662,10 @@ ACTION_FUNCTION(A_Chase)
 					// check as the monster should try to get melee in.
 					if (dist == 1 && !melee)
 					{
-						fixed targetdist = abs(self->x - self->target->x);
+						fixed targetdist = abs(self->x - target->x);
 						if (targetdist < 0x14000l) //  < 1.25 tiles or 80 units
 						{
-							targetdist = abs(self->y - self->target->y);
+							targetdist = abs(self->y - target->y);
 							if (targetdist < 0x14000l)
 								chance = 256;
 						}
@@ -633,7 +709,7 @@ ACTION_FUNCTION(A_Chase)
 			//
 			// check for melee range
 			//
-			if(melee && CheckMeleeRange(self, self->target, self->speed))
+			if(melee && CheckMeleeRange(self, target, self->speed))
 			{
 				PlaySoundLocActor(self->attacksound, self);
 				self->SetState(melee);
@@ -668,8 +744,8 @@ ACTION_FUNCTION(A_Chase)
 			SelectPathDir (self);
 		else
 		{
-			dx = abs(self->tilex - self->target->tilex);
-			dy = abs(self->tiley - self->target->tiley);
+			dx = abs(self->tilex - target->tilex);
+			dy = abs(self->tiley - target->tiley);
 			dist = dx>dy ? dx : dy;
 			if ((flags & CHF_BACKOFF) && dist < 4)
 				SelectRunDir (self);
@@ -793,7 +869,9 @@ ACTION_FUNCTION(A_WolfAttack)
 		return true;
 	}
 
-	runspeed *= 37.5;
+	// 37.5f, not 37.5: runspeed is a hardware float; the double literal
+	// forced a soft-float extend/multiply/truncate round trip per shot.
+	runspeed *= 37.5f;
 
 	A_Face(self, target);
 

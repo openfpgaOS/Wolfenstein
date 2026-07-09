@@ -364,7 +364,21 @@ void ScalePost()
 				// column.
 				const int texstep =
 					(int)(((uint32_t)texyscale << FRACBITS) / (uint32_t)yd);
-				const int texfracBottom = ((yw + 1) << FRACBITS) - 1;
+				// The DDA carries a sub-texel phase in ywcount: the bottom
+				// visible row sits ywcount/yd of the way into texel yw
+				// (ywcount == yd when the column is unclipped, reproducing
+				// the old ((yw + 1) << FRACBITS) - 1 exactly).  Submitting
+				// a full-phase frac regardless shifted every texel boundary
+				// of a bottom-clipped column up by (yd - ywcount)/texyscale
+				// rows -- a per-column sawtooth on close walls that
+				// re-rolled every frame while rotating (misaligned vertical
+				// spans).  ywcount <= yd <= ~3500 here, so the shifted
+				// dividend fits 32 bits.
+				int phase =
+					(int)(((uint32_t)ywcount << FRACBITS) / (uint32_t)yd);
+				if(phase < 1)
+					phase = 1;
+				const int texfracBottom = (yw << FRACBITS) + phase - 1;
 				const int texfrac = texfracBottom - texstep * (count - 1);
 				if(OF_WolfGPU_DrawColumn(dest, count, postsource, sourceLen,
 					texfrac, texstep, shadeIndex))

@@ -586,6 +586,24 @@ void FDecorateParser::ParseActorStateAction(StateDefinition &thisState, int func
 						else
 							val.useType = CallArguments::Value::VAL_DOUBLE;
 						val.expr = ExpressionNode::ParseExpression(newClass, TypeHierarchy::staticTypes, sc);
+						// Constant-fold: nearly all state arguments are
+						// literals or named constants (CHF_*, 360, ...),
+						// yet an unfolded expression forces the frame's
+						// ActionCall to re-Evaluate the heap tree -- per
+						// actor per tic for thinkers like A_Chase/A_Look.
+						// Same conversion as CallArguments::Evaluate.
+						if(val.expr && val.expr->IsConstant())
+						{
+							const ExpressionNode::Value &folded =
+								val.expr->Evaluate(NULL);
+							if(val.useType == CallArguments::Value::VAL_INTEGER)
+								val.val.i = folded.GetInt();
+							else
+								val.val.d = folded.GetDouble();
+							val.isExpression = false;
+							delete val.expr;
+							val.expr = NULL;
+						}
 					}
 					else if(argType == TypeHierarchy::staticTypes.GetType(TypeHierarchy::STATE))
 					{
