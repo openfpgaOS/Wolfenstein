@@ -757,7 +757,12 @@ protected:
 		Node *mp = MainPosition(key), **mpp;
 		HashTraits Traits;
 
-		if (!mp->IsNil() && !Traits.Compare(mp->Pair.Key, key)) /* the key is in its main position */
+		/* Nil main position: the key cannot be present, and a nil node's
+		 * Next holds the (Node *)1 marker, NOT a chain pointer — the
+		 * chain walk below would dereference it and fault. */
+		if (mp->IsNil())
+			return;
+		if (!Traits.Compare(mp->Pair.Key, key)) /* the key is in its main position */
 		{
 			if (mp->Next != NULL)		/* move next node to its main position */
 			{

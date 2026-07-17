@@ -106,6 +106,22 @@ PC_CXXFLAGS = $(filter-out -Icxx_compat,$(CXXFLAGS))
 # Declare default target before sdk.mk's rules
 .DEFAULT_GOAL := all
 
+# ── Containerized toolchain (C++-capable image) ──────────────────────
+# ECWolf throws/catches C++ exceptions, so app.elf links the toolchain's
+# REAL libsupc++ (EH runtime).  The shared openfpgaos-firmware image
+# ships no bare-metal C++ runtime (no rv32 libsupc++.a), so — like the
+# Diablo repo — this core builds in its own xPack-based image (see
+# tools/docker/Dockerfile.cxx; auto-built on first use).  The xPack
+# toolchain prefix is riscv-none-elf-, so pre-set CROSS before sdk.mk's
+# in-container `CROSS ?=` pin.  Host opt-out (USE_SDK_CONTAINER=0) is
+# untouched: it still auto-detects a host toolchain, which must then
+# ship libsupc++ for rv32imafc/ilp32f.
+export SDK_IMG        ?= openfpgaos-cxx
+export SDK_DOCKERFILE ?= $(ROOT)/tools/docker/Dockerfile.cxx
+ifeq ($(OF_SDK_IN_CONTAINER),1)
+CROSS := riscv-none-elf-
+endif
+
 include $(SDK_DIR)/sdk.mk
 
 -include $(APP_OBJS:.o=.d) $(OF_INIT_OBJ:.o=.d) $(OF_SDL2_OBJ:.o=.d)

@@ -41,9 +41,15 @@ ASSET_DIR="${ASSET_PLAT}common"
 mkdir -p "$ASSET_DIR"
 
 # Runtime FPGA artifacts (each copied independently so a missing one is
-# reported, not silently swallowed alongside the others).
-for f in os25.rbf_r loader.bin; do
-    [ -f "$RT/$f" ] && cp "$RT/$f" "$CORE_DIR" || echo "  warn: runtime/$f missing (run 'make sdk' in openfpgaOS)"
+# reported, not silently swallowed alongside the others).  The bitstream
+# is variant-named (os25.rbf_r / os30.rbf_r); copy exactly
+# the one this core's core.json points at — the single source of truth set
+# at scaffold time (customize.sh --variant).
+RBF=$(grep -o '"filename"[[:space:]]*:[[:space:]]*"[^"]*"' "$CORE_DIR/core.json" 2>/dev/null \
+      | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+[ -n "$RBF" ] || RBF="bitstream.rbf_r"
+for f in "$RBF" loader.bin; do
+    [ -f "$RT/$f" ] && cp "$RT/$f" "$CORE_DIR" || echo "  warn: runtime/$f missing (run 'make sdk VARIANT=… DEST=…' in openfpgaOS)"
 done
 [ -f "$RT/os.bin" ] && cp "$RT/os.bin" "$ASSET_DIR/" || echo "  warn: runtime/os.bin missing"
 

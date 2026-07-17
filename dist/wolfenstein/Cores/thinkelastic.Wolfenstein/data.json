@@ -28,8 +28,7 @@
                 "parameters": 0,
                 "extensions": [
                     "ini"
-                ],
-                "deferload": true
+                ]
             },
             {
                 "id": 3,
@@ -97,7 +96,7 @@
                 "required": false,
                 "parameters": "0x84",
                 "nonvolatile": true,
-                "address": "0x200C0000",
+                "address": "0x20380000",
                 "size_maximum": "0x40000",
                 "extensions": [
                     "cfg",

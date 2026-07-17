@@ -8,6 +8,21 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+
+/* Boot diagnostic: print the OS-reported size for a slot-bound file.  The
+ * ZIP music pack is the only consumer that trusts st_size (end-relative
+ * EOCD scan); header-driven formats never notice a bad size, so a wrong
+ * value here silently breaks just the music.  One UART line per file makes
+ * a size regression visible at a glance. */
+static void of_ecwolf_log_file_size(const char *filename)
+{
+    struct stat st;
+    if (stat(filename, &st) == 0)
+        printf("OpenFPGA: %s size=%lld bytes.\n", filename, (long long)st.st_size);
+    else
+        printf("OpenFPGA: %s stat failed.\n", filename);
+}
 
 static void of_ecwolf_setenv_default(const char *name, const char *value)
 {
@@ -156,6 +171,7 @@ static void of_ecwolf_openfpga_init(void)
 
     of_file_slot_register(4, "wolfmidi.zip");
     of_file_slot_register(7, "bank.ofsf");
+    of_ecwolf_log_file_size("wolfmidi.zip");
     of_ecwolf_log_bank_status();
     of_file_slot_register(8, "ecwolf.cfg");
     /* Host-rendered AdLib SFX cache (scripts/sfxcache.sh); optional. */

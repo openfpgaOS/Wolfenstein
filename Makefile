@@ -35,11 +35,12 @@
 # target.  Exported so the scripts and sub-makes resolve TARGET alike.
 TARGET ?= pocket
 export TARGET
-# Available platforms, discovered from the directory layout (dirs only —
-# the trailing-slash glob skips README.md and other stray files).
+# Available platforms, discovered from the directory layout.  Keyed on
+# platform.conf (part of the target contract) rather than a trailing-slash
+# glob — make 3.81's wildcard matches stray files like README.md too.
 empty :=
 space := $(empty) $(empty)
-PLATFORMS := $(notdir $(patsubst %/,%,$(wildcard src/sdk/platforms/*/)))
+PLATFORMS := $(notdir $(patsubst %/,%,$(dir $(wildcard src/sdk/platforms/*/platform.conf))))
 PLATFORMS_BAR := $(subst $(space),|,$(PLATFORMS))
 
 # ── Paths ────────────────────────────────────────────────────────────
@@ -91,9 +92,13 @@ C_RESET :=
 endif
 
 # ── Display name (detected custom core or <core> placeholder) ───────
-# Truncate to 10 chars with ... if too long, to keep help aligned
+# Truncate to 10 chars with ... if too long, to keep help aligned.
+# Kept POSIX + GNU Make 3.81 safe (the make Apple ships): no `#` (3.81
+# treats it as a comment even inside $(shell ...), eating the closing
+# paren), no `)` in the shell body (make matches parens), and no bashism
+# like $${n:0:7} (the $(shell) runs under /bin/sh).
 ifneq ($(APP_NAME),)
-A := $(shell n="$(APP_NAME)"; [ $${#n} -gt 10 ] && echo "$${n:0:7}..." || echo "$$n")
+A := $(shell n="$(APP_NAME)"; if [ `printf %s "$$n" | wc -c` -gt 10 ]; then printf %s "`printf %s "$$n" | cut -c1-7`..."; else printf %s "$$n"; fi)
 else
 A := <core>
 endif
@@ -322,7 +327,7 @@ release:
 
 # ── Push SDK to another SDK checkout ────────────────────────────────
 # Mirrors source + os.bin + bank.ofsf into another SDK at $(DEST).
-# Leaves the FPGA core (os25.rbf_r, ap_core.sof, loader.bin)
+# Leaves the FPGA core (os25/os30.rbf_r, ap_core.sof, loader.bin)
 # untouched so the destination keeps its own core build.  Existing
 # files in DEST that aren't in this tree are left alone — no --delete.
 push:
@@ -344,10 +349,23 @@ push:
 	@# game README/GETTING_STARTED) — only seed them if absent.
 	@[ -f "$(DEST)/README.md" ] || cp -f README.md "$(DEST)/README.md"
 	@[ -f "$(DEST)/GETTING_STARTED.md" ] || { [ -f GETTING_STARTED.md ] && cp -f GETTING_STARTED.md "$(DEST)/GETTING_STARTED.md"; } || true
+	@# Container tooling MUST travel with sdk.mk: its default build path
+	@# re-execs make through tools/sdk-container.sh, and the wrapper's
+	@# OF_SDK_IN_CONTAINER export is what stops that recursion inside the
+	@# container.  A repo with a new sdk.mk and an old wrapper can't build.
+	@mkdir -p "$(DEST)/tools/docker"
+	@cp -f tools/sdk-container.sh "$(DEST)/tools/sdk-container.sh"
+	@chmod +x "$(DEST)/tools/sdk-container.sh"
+	@cp -f tools/oci.sh "$(DEST)/tools/oci.sh"
+	@cp -f tools/docker/Dockerfile.firmware "$(DEST)/tools/docker/Dockerfile.firmware"
 	@mkdir -p "$(DEST)/runtime/pocket"
 	@cp -f runtime/pocket/os.bin "$(DEST)/runtime/pocket/os.bin"
+	@# loader.bin is the target-generic chip32 variant selector (NOT a
+	@# per-core bitstream), so it must propagate — otherwise game repos keep a
+	@# stale loader that ignores VARIANT=os30 and always boots os25.
+	@cp -f runtime/pocket/loader.bin "$(DEST)/runtime/pocket/loader.bin"
 	@cp -f runtime/bank.ofsf     "$(DEST)/runtime/bank.ofsf"
-	@printf "  skipped: runtime/pocket/{os25.rbf_r, ap_core.sof, loader.bin}\n"
+	@printf "  skipped: runtime/pocket/{*.rbf_r, ap_core.sof}\n"
 
 # ── Build host tools ────────────────────────────────────────────────
 tools:
