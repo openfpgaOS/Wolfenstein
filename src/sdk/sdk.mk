@@ -50,10 +50,10 @@
 # (riscv64-elf- on Arch/Homebrew), which is exactly the reproducibility
 # gap the container default closes.
 ifeq ($(OF_SDK_IN_CONTAINER),1)
-# ?= so an app that ships its OWN container image (SDK_IMG=… with a
-# different toolchain prefix — e.g. a C++ core using the xPack
-# riscv-none-elf- image for libsupc++) can pre-set CROSS before
-# including sdk.mk.  Default stays pinned to the shared image's prefix.
+# ?= so the two real-C++-runtime engines (DevilutionX, ECWolf) can pin
+# CROSS := riscv-none-elf- (the xPack toolchain also baked into the image)
+# before including sdk.mk; every other repo leaves CROSS unset and gets
+# the same riscv64-unknown-elf- as always.
 CROSS  ?= riscv64-unknown-elf-
 else
 CROSS  ?= $(shell which riscv64-unknown-elf-gcc >/dev/null 2>&1 && echo riscv64-unknown-elf- || echo riscv64-elf-)
