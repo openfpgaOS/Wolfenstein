@@ -85,6 +85,7 @@ void Config::ReadConfig()
 	if(configFile.IsEmpty())
 		return;
 
+	printf("ReadConfig: open %s\n", configFile.GetChars());
 	FILE *stream = File(configFile).open("rb");
 	if(stream)
 	{
@@ -93,8 +94,10 @@ void Config::ReadConfig()
 		unsigned int size = static_cast<unsigned int>(ftell(stream));
 		if(fseek(stream, 0, SEEK_SET))
 			return;
+		printf("ReadConfig: size %u, reading\n", size);
 		char* data = new char[size];
 		fread(data, 1, size, stream);
+		printf("ReadConfig: read done, scanning\n");
 		// The eof flag seems to trigger fail on windows.
 		if(!feof(stream) && ferror(stream))
 		{
@@ -143,6 +146,7 @@ void Config::ReadConfig()
 
 		delete[] data;
 	}
+	printf("ReadConfig: done (settings=%u)\n", settings.CountUsed());
 
 	if(settings.CountUsed() == 0)
 		firstRun = true;
