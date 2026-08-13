@@ -151,8 +151,12 @@ $(CRT_DIR)/start.o: $(CRT_DIR)/start.S
 all: $(OBJ_DIR)/app.elf release
 	@$(SIZE) $<
 
+ifeq ($(TARGET),mister)
+release: game-dist        # MiSTer: the per-game bundle IS the release artifact
+else
 release: $(OBJ_DIR)/app.elf
 	@$(SDK_DIR)/platforms/$(TARGET)/image.sh "$(APP)" "$(OBJ_DIR)/app.elf" "$(ROOT)" "$(DIST)" $(GAME_ASSETS)
+endif
 
 COMMON = $(shell ls -d $(OUT)/Assets/*/common 2>/dev/null)
 
@@ -171,3 +175,45 @@ clean: sdk-clean
 	rm -rf $(OUT)
 
 .PHONY: all release debug copy package test clean
+
+# ── MiSTer per-game locked distribution ──────────────────────────────
+# Mirrors src/doom/Makefile: read-only boot.vhd shell (the data files), a
+# writable saves volume, one .mgl per instance and the loose F-loaded engine.
+#
+# Each data family ships as its OWN game bundle (own boot.vhd, wads/, saves,
+# .mgl) instead of five instances sharing one image: the OS's file-name table
+# holds 32 entries per boot, and one shared common/ with all five families'
+# data sets was 47 files — the overflow was silent and the VSWAP.* family
+# simply vanished, black-screening ECWolf before its first frame (2026-08-13).
+# A family bundle is ~12 files, and users only download the families they own.
+GAME_FAMILIES = Wolfenstein3D:wolf3d Spear:spear SpearM2:spear-m2 SpearM3:spear-m3 SuperNoah:noah
+GAME_INIS   = $(DIST)/Assets/wolfenstein/common
+GAME_STAGE  = $(ROOT)/build/mister/$(APP)
+GAME_ELF    = wolfenstein.elf
+GAME_CSV    = $(DIST)/mister/external_files.csv
+
+game-dist: $(OBJ_DIR)/app.elf
+	@rm -rf "$(GAME_STAGE)"
+	@for fam in $(GAME_FAMILIES); do \
+	  g=$${fam%%:*}; ini=$${fam##*:}; \
+	  common="$(ROOT)/build/mister/.$(APP)-common-$$g"; \
+	  inis="$(ROOT)/build/mister/.$(APP)-inis-$$g"; \
+	  rm -rf "$$common" "$$inis"; \
+	  mkdir -p "$(GAME_STAGE)/$$g/wads" "$$common" "$$inis"; \
+	  cp "$(RUNTIME)/bank.ofsf" "$$common/bank.ofsf"; \
+	  cp "$(GAME_INIS)/wolfmidi.zip" "$$common/" 2>/dev/null || true; \
+	  cp "$(GAME_INIS)/sfxcache.ofx" "$$common/" 2>/dev/null || true; \
+	  cp "$(GAME_INIS)/$$ini.ini" "$$inis/"; \
+	  $(SDK_DIR)/platforms/mister/mkgame.sh --no-elf \
+	      --saves-out "$(GAME_STAGE)/$$g/$$g.saves.vhd" \
+	      "$$g" "$$inis" "$$common" "$(GAME_STAGE)/$$g/boot.vhd" || exit 1; \
+	  $(SDK_DIR)/platforms/mister/mkmgl.sh "$$g" "$$inis" "$(GAME_STAGE)" || exit 1; \
+	  cp "$(OBJ_DIR)/app.elf" "$(GAME_STAGE)/$$g/$(GAME_ELF)"; \
+	  cp "$(GAME_INIS)/$$ini.ini" "$(GAME_STAGE)/$$g/"; \
+	  sed "s|^GAME_DEFAULT=.*|GAME_DEFAULT=\"$$g\"|" \
+	      "$(SDK_DIR)/platforms/mister/setup.sh" > "$(GAME_STAGE)/$$g/setup.sh"; \
+	  chmod +x "$(GAME_STAGE)/$$g/setup.sh"; \
+	  if [ -f "$(GAME_CSV)" ]; then cp "$(GAME_CSV)" "$(GAME_STAGE)/$$g/external_files.csv"; fi; \
+	  rm -rf "$$common" "$$inis"; \
+	done
+	@echo "  game-dist staged -> $(GAME_STAGE) (families: $(GAME_FAMILIES))"
