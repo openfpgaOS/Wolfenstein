@@ -222,6 +222,7 @@ game-dist: $(OBJ_DIR)/app.elf
 	      "$(GAME)" "$$inis" "$(GAME_STAGE)" || exit 1; \
 	  rm -rf "$$common" "$$inis"; \
 	done
+	@gzip -9nf "$(GAME_STAGE)/$(GAME)"/boot-*.vhd
 	@cp "$(OBJ_DIR)/app.elf" "$(GAME_STAGE)/$(GAME)/$(GAME_ELF)"
 	@cp "$(GAME_INIS)"/*.ini "$(GAME_STAGE)/$(GAME)/"
 	@sed -e 's|^GAME_DEFAULT=.*|GAME_DEFAULT="$(GAME)"|' \
