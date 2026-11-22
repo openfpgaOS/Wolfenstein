@@ -35,12 +35,11 @@
 # target.  Exported so the scripts and sub-makes resolve TARGET alike.
 TARGET ?= pocket
 export TARGET
-# Available platforms, discovered from the directory layout.  Keyed on
-# platform.conf (part of the target contract) rather than a trailing-slash
-# glob — make 3.81's wildcard matches stray files like README.md too.
+# Available platforms, discovered from the directory layout (dirs only —
+# the trailing-slash glob skips README.md and other stray files).
 empty :=
 space := $(empty) $(empty)
-PLATFORMS := $(notdir $(patsubst %/,%,$(dir $(wildcard src/sdk/platforms/*/platform.conf))))
+PLATFORMS := $(notdir $(patsubst %/,%,$(wildcard src/sdk/platforms/*/)))
 PLATFORMS_BAR := $(subst $(space),|,$(PLATFORMS))
 
 # ── Paths ────────────────────────────────────────────────────────────
@@ -327,7 +326,7 @@ release:
 
 # ── Push SDK to another SDK checkout ────────────────────────────────
 # Mirrors source + os.bin + bank.ofsf into another SDK at $(DEST).
-# Leaves the FPGA core (os25/os30.rbf_r, ap_core.sof, loader.bin)
+# Leaves the FPGA core (os20/os25.rbf_r, ap_core.sof, loader.bin)
 # untouched so the destination keeps its own core build.  Existing
 # files in DEST that aren't in this tree are left alone — no --delete.
 push:
@@ -362,7 +361,7 @@ push:
 	@cp -f runtime/pocket/os.bin "$(DEST)/runtime/pocket/os.bin"
 	@# loader.bin is the target-generic chip32 variant selector (NOT a
 	@# per-core bitstream), so it must propagate — otherwise game repos keep a
-	@# stale loader that ignores VARIANT=os30 and always boots os25.
+	@# stale loader.
 	@cp -f runtime/pocket/loader.bin "$(DEST)/runtime/pocket/loader.bin"
 	@cp -f runtime/bank.ofsf     "$(DEST)/runtime/bank.ofsf"
 	@printf "  skipped: runtime/pocket/{*.rbf_r, ap_core.sof}\n"

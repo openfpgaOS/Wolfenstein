@@ -40,6 +40,15 @@ BUILD     = $(SDK_ROOT)/build/pocket/sdk
 # Discover SDK apps: every src/apps/<name>/ that has its own Makefile.
 APPS = $(sort $(patsubst %/,%,$(dir $(wildcard */Makefile))))
 
+# The os30 3D demo core (dist/sdk/Cores/ThinkElastic.openfpgaOS3D, platform
+# openfpgaos3d, the triangles demo) stays in the tree, but SDK 0.9.7 ships no
+# os30 image: the last one predates the API 0.9.1 kernel.  While
+# runtime/pocket/os30.rbf_r is absent the release step leaves that core, its
+# platform and triangles.elf out of the bundle; they return by themselves once
+# an os30 image built for the current kernel is published into runtime/pocket/.
+HAVE_OS30 = $(wildcard $(RUNTIME_POCKET)/os30.rbf_r)
+POCKET_SKIP = $(if $(HAVE_OS30),,triangles)
+
 all: build-apps release
 
 build-apps:
@@ -54,12 +63,16 @@ release:
 	@rm -rf $(BUILD)
 	@mkdir -p $(SDK_ROOT)/build/pocket
 	@cp -r $(DIST)/ $(BUILD)/
-	@# Runtime binaries (pocket-specific → runtime/pocket/).  Each core pins ONE
-	@# bitstream as its sole cores[] entry with per-core chip32_vm (framework-level
-	@# chip32_vm disables the APF datatable auto-population — see git history).  So
-	@# os25/os30 ship as SEPARATE cores: the os25 demo core (os25.rbf_r) and the
-	@# os30 3D core (os30.rbf_r).  Give every core dir exactly the bitstream(s) its
-	@# own core.json names, plus the shared loader VM.
+	@# Runtime binaries (pocket-specific → runtime/pocket/).  The demo core pins ONE
+	@# bitstream (os25.rbf_r) as its sole cores[] entry with per-core chip32_vm
+	@# (framework-level chip32_vm disables the APF datatable auto-population — see
+	@# git history).  Give every core dir exactly the bitstream(s) its own
+	@# core.json names, plus the shared loader VM.
+	@if [ -z "$(HAVE_OS30)" ]; then \
+		rm -rf "$(BUILD)/Cores/ThinkElastic.openfpgaOS3D" "$(BUILD)/Assets/openfpgaos3d" \
+		       "$(BUILD)/Platforms/openfpgaos3d.json"; \
+		echo "  os30.rbf_r not in runtime/pocket/ - leaving the openfpgaOS3D core out"; \
+	fi
 	@for core in $(BUILD)/Cores/*/; do \
 		for rbf in $$(grep -o '"[^"]*\.rbf_r"' "$$core/core.json" | tr -d '"' | sort -u); do \
 			cp $(RUNTIME_POCKET)/$$rbf "$$core/" || exit 1; \
@@ -72,6 +85,7 @@ release:
 	@cp $(RUNTIME)/bank.ofsf $(BUILD)/Assets/$(PLATFORM)/common/ 2>/dev/null || true
 	@# Demo ELFs + data files
 	@for app in $(APPS); do \
+		case " $(POCKET_SKIP) " in *" $$app "*) continue ;; esac; \
 		[ -f "$(SDK_ROOT)/.obj/sdk/$$app/app.elf" ] && \
 			cp "$(SDK_ROOT)/.obj/sdk/$$app/app.elf" "$(BUILD)/Assets/$(PLATFORM)/common/$$app.elf"; \
 		for f in $$app/*.mid $$app/*.mod $$app/*.wav $$app/*.dat $$app/*.png \

@@ -12,10 +12,9 @@
  * in parallel, writing pixels to the framebuffer via AXI4.
  *
  * Ring buffer: 16 KB in GPU-internal M10K BRAM.  CPU builds command
- * streams in a cached SDRAM scratch buffer, flushes and drains those
- * cache lines, then the GPU doorbell-DMA pulls the words into the ring
- * and publishes the write pointer atomically.  There is no CPU MMIO
- * command-data path.
+ * streams in a cached scratch buffer. On capable cores, CPU MMIO stores
+ * upload a complete batch into the ring before publishing it atomically.
+ * Older cores use cache writeback followed by the GPU command DMA.
  *
  * IMPORTANT: This header contains static mutable state (_gpu_wrptr, etc).
  * Include it from exactly ONE translation unit per program.
@@ -30,6 +29,47 @@ extern "C" {
 
 #include <stdint.h>
 #include <string.h>
+
+/* Optional cooperative service during GPU command/fence waits. Define before
+ * including this header. The hook must return promptly and must not call GPU
+ * APIs, change command buffers, or re-enter these waits. It runs only on the
+ * calling thread; applications can use it to service audio deadlines.
+ * Keep the default empty so existing applications pay no additional cost. */
+#ifndef OF_GPU_WAIT_HOOK
+#define OF_GPU_WAIT_HOOK() ((void)0)
+#endif
+
+/* Optional episode timing, defined before inclusion by diagnostic builds.
+ * BEGIN receives true only on the first failed poll; END receives whether
+ * any poll failed. Hooks must evaluate those predicates before reading a
+ * timer, must not re-enter GPU APIs, and run on the calling thread only.
+ * Ring timing excludes preceding submission/DMA waits. These hooks do not
+ * cover MMIO store latency, texture/LUT uploads, nonblocking reserve probes,
+ * or application/kernel presentation waits. Defaults generate no code. */
+#define OF_GPU_WAIT_PROFILE_RING   0u
+#define OF_GPU_WAIT_PROFILE_DMA    1u
+#define OF_GPU_WAIT_PROFILE_FENCE  2u
+#ifndef OF_GPU_WAIT_PROFILE_BEGIN
+#define OF_GPU_WAIT_PROFILE_BEGIN(kind, first) ((void)0)
+#endif
+#ifndef OF_GPU_WAIT_PROFILE_END
+#define OF_GPU_WAIT_PROFILE_END(kind, waited) ((void)0)
+#endif
+#ifndef OF_GPU_WAIT_PROFILE_RESET
+#define OF_GPU_WAIT_PROFILE_RESET() ((void)0)
+#endif
+
+/* Optional per-batch transport timing. CPU-ring timing includes the staged
+ * loads, MMIO stores, status check and publish. DMA timing covers source
+ * visibility preparation only; descriptor/idle waits are separate wait hooks.
+ * Neither hook runs per word; defaults generate no code. */
+#ifndef OF_GPU_SUBMIT_PROFILE_BEGIN
+#define OF_GPU_SUBMIT_PROFILE_BEGIN(cpu_ring) ((void)0)
+#endif
+#ifndef OF_GPU_SUBMIT_PROFILE_END
+#define OF_GPU_SUBMIT_PROFILE_END(cpu_ring, words) ((void)0)
+#endif
+
 
 #ifndef OF_PC
 #include "of_caps.h"
@@ -247,11 +287,11 @@ static uint32_t _gpu_base;
 
 #define OF_GPU_REG(off)         (*(volatile uint32_t *)(_gpu_base + (off)))
 
-#define GPU_CTRL                OF_GPU_REG(0x00)  /* W: bit0=enable, bit1=soft_reset, bit2=ring_reset */
-#define GPU_RING_WRPTR          OF_GPU_REG(0x04)  /* R: published write pointer */
+#define GPU_CTRL                OF_GPU_REG(0x00)  /* W: reset/control flags; optional CPU transport flags below */
+#define GPU_RING_WRPTR          OF_GPU_REG(0x04)  /* R: published byte pointer; W: append a word in CPU-ring mode */
 #define GPU_DMA_SRC             OF_GPU_REG(0x0C)  /* W: SDRAM byte address of command buffer to pull */
 #define GPU_RING_RDPTR          OF_GPU_REG(0x10)  /* R: GPU read pointer */
-#define GPU_STATUS              OF_GPU_REG(0x14)  /* R: bit6=DMA desc full, bit3=transluc busy, bit2=DMA busy, bit1=ring empty, bit0=busy */
+#define GPU_STATUS              OF_GPU_REG(0x14)  /* R: GPU_STATUS_* flags */
 #define GPU_FENCE_REACHED       OF_GPU_REG(0x18)  /* R: last completed fence token */
 #define GPU_DMA_LEN             OF_GPU_REG(0x1C)  /* W: word count to pull (≤4096) */
 #define GPU_TRANSLUC_ADDR       OF_GPU_REG(0x20)  /* W: byte addr into transluc[] (auto-inc by 4) */
@@ -286,7 +326,16 @@ static uint32_t _gpu_base;
 #define GPU_CHANUTIL_WR_Z       6u   /* write occupancy, z-write source */
 #define GPU_CHANUTIL_WR_COLOR   7u   /* write occupancy, color-write source */
 
+/* Optional command-ring transport controls. DMA remains the reset default. */
+#define GPU_CTRL_CPU_RING_PUBLISH (1u << 3)
+#define GPU_CTRL_CPU_RING_SELECT  (1u << 4)
+#define GPU_CTRL_DMA_RING_SELECT  (1u << 5)
+
 /* GPU_STATUS bit definitions */
+#define GPU_STATUS_CPU_RING_CAP 0x80u
+#define GPU_STATUS_CPU_RING_MODE 0x100u
+#define GPU_STATUS_CPU_RING_OVERFLOW 0x200u
+
 #define GPU_STATUS_BUSY        0x1u
 #define GPU_STATUS_RING_EMPTY  0x2u
 #define GPU_STATUS_DMA_BUSY    0x4u  /* SDRAM command/payload DMA busy */
@@ -435,6 +484,8 @@ static uint32_t _gpu_base;
  * Static mutable — include this header from one .c file only.
  * ================================================================ */
 
+/* Selected once during initialization; command buffers remain CPU-owned. */
+static int _gpu_cpu_ring;
 static uint32_t _gpu_wrptr;
 static uint32_t _gpu_known_rdptr;
 static uint32_t _gpu_fence_next;
@@ -514,9 +565,12 @@ static inline void _gpu_wait_dma_idle_debug(void) {
      * here forever with no diagnostic. */
     uint32_t dma_spins = 0;
     while (GPU_STATUS & GPU_STATUS_DMA_BUSY) {
+        OF_GPU_WAIT_PROFILE_BEGIN(OF_GPU_WAIT_PROFILE_DMA, dma_spins == 0u);
+        OF_GPU_WAIT_HOOK();
         if (++dma_spins == 50000000u)
             __builtin_trap();  /* → fatal_trap dumps GPU state */
     }
+    OF_GPU_WAIT_PROFILE_END(OF_GPU_WAIT_PROFILE_DMA, dma_spins != 0u);
     _gpu_batch_inflight_mask = 0;
     if (dma_spins) {
         _gpu_dbg_dma_waits++;
@@ -533,9 +587,12 @@ static inline void _gpu_wait_dma_desc_slot_debug(void) {
 
     uint32_t dma_spins = 0;
     while (GPU_STATUS & GPU_STATUS_DMA_DESC_FULL) {
+        OF_GPU_WAIT_PROFILE_BEGIN(OF_GPU_WAIT_PROFILE_DMA, dma_spins == 0u);
+        OF_GPU_WAIT_HOOK();
         if (++dma_spins == 50000000u)
             __builtin_trap();  /* wedged DMA queue — see of_gpu_wait */
     }
+    OF_GPU_WAIT_PROFILE_END(OF_GPU_WAIT_PROFILE_DMA, dma_spins != 0u);
     if (dma_spins) {
         _gpu_dbg_dma_waits++;
         _gpu_dbg_dma_spin_iters += dma_spins;
@@ -544,6 +601,7 @@ static inline void _gpu_wait_dma_desc_slot_debug(void) {
 
 static inline void _gpu_wait_transluc_idle(void) {
     while (GPU_STATUS & GPU_STATUS_TRANSLUC_BUSY) {
+        OF_GPU_WAIT_HOOK();
     }
 }
 
@@ -605,6 +663,76 @@ static inline void _gpu_flush_cmd_stream(void) {
     uint32_t submit_words = _gpu_cmd_words;
     uint32_t submit_index = _gpu_batch_index;
 
+    if (_gpu_cpu_ring) {
+        OF_GPU_SUBMIT_PROFILE_BEGIN(1);
+        /* Space for the complete batch was reserved before staging it. The
+         * published pointer moves only after every word reaches ring BRAM. */
+        /* Load four words before their MMIO stores to avoid load/use bubbles.
+         * Four groups per iteration amortize the branch without keeping a
+         * whole 16-word cache line live in registers. */
+        const uint32_t *src = _gpu_batch_buf;
+        volatile uint32_t *const port = &GPU_RING_WRPTR;
+        uint32_t remaining = submit_words;
+        while (remaining >= 16u) {
+            {
+                uint32_t w0 = src[0];
+                uint32_t w1 = src[1];
+                uint32_t w2 = src[2];
+                uint32_t w3 = src[3];
+                *port = w0;
+                *port = w1;
+                *port = w2;
+                *port = w3;
+            }
+            {
+                uint32_t w0 = src[4];
+                uint32_t w1 = src[5];
+                uint32_t w2 = src[6];
+                uint32_t w3 = src[7];
+                *port = w0;
+                *port = w1;
+                *port = w2;
+                *port = w3;
+            }
+            {
+                uint32_t w0 = src[8];
+                uint32_t w1 = src[9];
+                uint32_t w2 = src[10];
+                uint32_t w3 = src[11];
+                *port = w0;
+                *port = w1;
+                *port = w2;
+                *port = w3;
+            }
+            {
+                uint32_t w0 = src[12];
+                uint32_t w1 = src[13];
+                uint32_t w2 = src[14];
+                uint32_t w3 = src[15];
+                *port = w0;
+                *port = w1;
+                *port = w2;
+                *port = w3;
+            }
+            src += 16;
+            remaining -= 16;
+        }
+        while (remaining--) {
+            *port = *src++;
+        }
+        uint32_t status = GPU_STATUS;
+        if ((status & (GPU_STATUS_CPU_RING_MODE | GPU_STATUS_CPU_RING_OVERFLOW))
+            != GPU_STATUS_CPU_RING_MODE)
+            __builtin_trap();
+        GPU_CTRL = GPU_CTRL_CPU_RING_PUBLISH;
+        OF_GPU_SUBMIT_PROFILE_END(1, submit_words);
+        _gpu_cmd_words = 0;
+        _gpu_unflushed_sync = 0;
+        _gpu_batch_inflight_mask = 0;
+        _gpu_select_batch_buffer(submit_index ^ 1u);
+        return;
+    }
+
     /* Publish the staged commands to DRAM — path is per-platform.
      *
      * MiSTer: the doorbell DMA has GPU-over-CPU priority at the SDRAM
@@ -624,6 +752,7 @@ static inline void _gpu_flush_cmd_stream(void) {
      * and far faster than re-writing every command word through the
      * single-outstanding uncached alias (thousands of serialized stores
      * per heavy frame = visible frame-rate loss on the handheld). */
+    OF_GPU_SUBMIT_PROFILE_BEGIN(0);
     if (_gpu_publish_uncached < 0)
         _gpu_publish_uncached =
             (of_get_caps()->platform_id == OF_PLATFORM_MISTER);
@@ -637,6 +766,7 @@ static inline void _gpu_flush_cmd_stream(void) {
         _gpu_flush_cmd_cache_range(_gpu_batch_buf, submit_words * 4u);
         _gpu_drain_cmd_writeback(submit_words * 4u);
     }
+    OF_GPU_SUBMIT_PROFILE_END(0, submit_words);
     _gpu_wait_dma_desc_slot_debug();
 
     /* The publish above is the data-visibility barrier.  The GPU MMIO
@@ -682,9 +812,12 @@ static inline void _gpu_ring_ensure(uint32_t bytes) {
             _gpu_note_ring_free(ring_free);
             if (ring_free >= bytes)
                 break;
+            OF_GPU_WAIT_PROFILE_BEGIN(OF_GPU_WAIT_PROFILE_RING, ring_spins == 0u);
+            OF_GPU_WAIT_HOOK();
             if (++ring_spins == 50000000u)
                 __builtin_trap();  /* → fatal_trap dumps GPU state */
         } while (1);
+        OF_GPU_WAIT_PROFILE_END(OF_GPU_WAIT_PROFILE_RING, ring_spins != 0u);
         _gpu_dbg_ring_waits++;
         _gpu_dbg_ring_spin_iters += ring_spins;
     }
@@ -740,6 +873,7 @@ static inline int of_gpu_try_reserve_bytes(uint32_t bytes,
     while (ring_free < bytes) {
         if (spin_limit-- == 0u)
             return 0;
+        OF_GPU_WAIT_HOOK();
         ring_free = _gpu_ring_free_now();
         _gpu_note_ring_free(ring_free);
     }
@@ -794,6 +928,8 @@ static inline void _gpu_cmd_header(uint8_t cmd, uint32_t payload_words) {
  * API Functions
  * ================================================================ */
 
+static inline int of_gpu_use_cpu_ring(void);
+
 static inline void of_gpu_init(void) {
     /* Resolve the GPU MMIO base from the runtime caps descriptor.
      * Must be called after main() (or after the SDK constructors run)
@@ -802,10 +938,11 @@ static inline void of_gpu_init(void) {
      * Pocket, so always initialize before touching GPU helpers or MMIO. */
     _gpu_base = of_get_caps()->gpu_base;
 
+    _gpu_cpu_ring = 0;
     _gpu_wrptr = 0;
     _gpu_known_rdptr = 0;
-    _gpu_fence_next = 1;
     _gpu_cmd_words = 0;
+    _gpu_unflushed_sync = 0;
     _gpu_batch_dma_base = 0;
     _gpu_batch_dma_addr = 0;
     _gpu_batch_index = 0;
@@ -818,12 +955,22 @@ static inline void of_gpu_init(void) {
     _gpu_dbg_ring_waits = 0;
     _gpu_dbg_ring_spin_iters = 0;
     _gpu_dbg_min_ring_free = OF_GPU_RING_SIZE;
+    OF_GPU_WAIT_PROFILE_RESET();
     _gpu_state_valid = 0;
     _gpu_span_hdr_valid = 0;
     GPU_CTRL = 6;               /* soft_reset | ring_reset */
     for (volatile int i = 0; i < 100; i++) {}
     GPU_CTRL = 4;               /* ring_reset: clear wr_addr + wrptr + rdptr */
     GPU_CTRL = 1;               /* enable */
+    /* Texture fetches start on SDRAM, whatever a previous app left routed to
+     * fast texture memory (neither reset clears the route).  The soft reset
+     * stopped the pipeline and the delay outlasts any texture-cache fill in
+     * flight, so the fill response mux cannot switch mid-burst.  The register
+     * is ignored on cores without fast texture memory. */
+    _GPU_FAST_TEX_ENABLE = 0u;
+    /* Soft/ring reset does not clear the completed fence on existing cores.
+     * Start beyond it so reinitialization cannot accept a stale completion. */
+    _gpu_fence_next = GPU_FENCE_REACHED + 1u;
 
     /* Command words are written through cached SDRAM for normal CPU store
      * speed.  _gpu_flush_cmd_stream() handles the external-master handoff
@@ -859,6 +1006,20 @@ static inline void of_gpu_init(void) {
     }
 
     GPU_TEX_FLUSH = 1;
+    of_gpu_use_cpu_ring();
+}
+
+/* Initialization selects this automatically. Custom initializers can call it
+ * before staging any commands.
+ * Older cores keep DMA and return zero. The hardware selects one BRAM writer
+ * at a time; DMA submissions are disabled while CPU-ring mode is selected. */
+static inline int of_gpu_use_cpu_ring(void) {
+    if (_gpu_cmd_words || _gpu_batch_inflight_mask || _gpu_batch_buf == NULL) return 0;
+    uint32_t status = GPU_STATUS;
+    if (!(status & GPU_STATUS_CPU_RING_CAP) || (status & GPU_STATUS_DMA_BUSY)) return 0;
+    GPU_CTRL = GPU_CTRL_CPU_RING_SELECT;
+    _gpu_cpu_ring = (GPU_STATUS & GPU_STATUS_CPU_RING_MODE) != 0;
+    return _gpu_cpu_ring;
 }
 
 /* Upload a palookup table to slot N in SDRAM.  The GPU reads palookup
@@ -1020,10 +1181,13 @@ static inline void of_gpu_wait(uint32_t token) {
      * a genuine hang surfaces quickly. */
     uint32_t spins = 50000000u;
     while (!of_gpu_fence_reached(token)) {
+        OF_GPU_WAIT_PROFILE_BEGIN(OF_GPU_WAIT_PROFILE_FENCE, spins == 50000000u);
+        OF_GPU_WAIT_HOOK();
         if (--spins == 0) {
             __builtin_trap();  /* → illegal-instruction trap, mcause=2 */
         }
     }
+    OF_GPU_WAIT_PROFILE_END(OF_GPU_WAIT_PROFILE_FENCE, spins != 50000000u);
 }
 
 static inline void of_gpu_finish(void) {
@@ -1039,6 +1203,9 @@ static inline void of_gpu_prepare_framebuffer_for_cpu(void) {
 
 static inline void of_gpu_shutdown(void) {
     of_gpu_finish();
+    /* Leave texture fetches on SDRAM for whatever runs next (the GPU is idle,
+     * so no fill is in flight).  Ignored without fast texture memory. */
+    _GPU_FAST_TEX_ENABLE = 0u;
     GPU_CTRL = 0;
     _gpu_state_valid = 0;
     _gpu_span_hdr_valid = 0;
@@ -1221,7 +1388,7 @@ static inline void of_gpu_clear_rect_strided(uint32_t start_byte_addr,
 static inline void
 _gpu_emit_param_span_list(const of_gpu_param_span_list_t *p,
                           const of_gpu_param_span_record_t *records,
-                          uint32_t record_count);
+                          uint32_t record_count, uint32_t counts_or);
 
 /* RTL span-count wires are 12-bit: a count >= 4096 truncates mod 4096 in
  * hardware (documented failure class — misrendered spans, and on some
@@ -1441,7 +1608,7 @@ of_gpu_draw_persp_span_group(const of_gpu_persp_span_group_t *span) {
             live |= records[i].count;
         }
         if (live != 0)
-            _gpu_emit_param_span_list(&p, records, n);
+            _gpu_emit_param_span_list(&p, records, n, live);
         first += n;
         lanes_left -= n;
     }
@@ -1514,7 +1681,7 @@ _gpu_emit_param_span_header_words(const of_gpu_param_span_list_t *p,
 static inline void
 _gpu_emit_param_span_list(const of_gpu_param_span_list_t *p,
                           const of_gpu_param_span_record_t *records,
-                          uint32_t record_count) {
+                          uint32_t record_count, uint32_t counts_or) {
     uint32_t control;
     uint32_t q29_attr_shift = 0;
 
@@ -1550,7 +1717,17 @@ _gpu_emit_param_span_list(const of_gpu_param_span_list_t *p,
 #ifndef OF_PC
             && of_has_feature(OF_HW_GPU_SPAN_CONT)
 #endif
-            && __builtin_memcmp(hdr, _gpu_span_hdr_cache, sizeof(hdr)) == 0;
+            ;
+        /* Both arrays contain words, and only equality matters. Avoid the
+         * RV32 libc's byte-at-a-time memcmp for every resident surface. */
+        if (use_cont) {
+            for (uint32_t i = 0; i < 29u; i++) {
+                if (hdr[i] != _gpu_span_hdr_cache[i]) {
+                    use_cont = 0;
+                    break;
+                }
+            }
+        }
         if (use_cont) {
             /* Records-only continuation: {count, shift} + record pairs. */
             uint32_t *w;
@@ -1563,9 +1740,18 @@ _gpu_emit_param_span_list(const of_gpu_param_span_list_t *p,
         } else {
             _gpu_cmd_header(GPU_CMD_DRAW_PARAM_SPAN_LIST,
                             OF_GPU_PARAM_SPAN_LIST_WORDS(record_count));
-            _gpu_emit_param_span_header_words(p, control, record_count,
-                                              q29_attr_shift);
-            __builtin_memcpy(_gpu_span_hdr_cache, hdr, sizeof(hdr));
+            uint32_t *w = _gpu_ring_claim();
+            /* Reuse the comparison's words. Publish and remember the
+             * header in one pass. */
+#pragma GCC unroll 4
+            for (uint32_t i = 0; i < 29u; i++) {
+                uint32_t word = hdr[i];
+                w[i] = word;
+                _gpu_span_hdr_cache[i] = word;
+            }
+            w[29] = record_count;
+            w[30] = q29_attr_shift;
+            _gpu_ring_commit(31u);
             _gpu_span_hdr_valid = 1;
         }
     }
@@ -1574,19 +1760,35 @@ _gpu_emit_param_span_list(const of_gpu_param_span_list_t *p,
         /* Record pairs as raw sequential stores; the odd tail pairs with
          * an implicit zero record (same wire bytes as before). */
         uint32_t *w = _gpu_ring_claim();
-        uint32_t pairs = record_count >> 1;
-        for (uint32_t i = 0; i < pairs; i++) {
-            const of_gpu_param_span_record_t *a = &records[2u * i];
-            const of_gpu_param_span_record_t *b = a + 1;
-            *w++ = ((uint32_t)a->v << 16) | (uint32_t)a->u;
-            *w++ = ((uint32_t)b->u << 16) | _gpu_count12((uint32_t)a->count);
-            *w++ = (_gpu_count12((uint32_t)b->count) << 16) | (uint32_t)b->v;
-        }
-        if (record_count & 1u) {
-            const of_gpu_param_span_record_t *a = &records[record_count - 1u];
-            *w++ = ((uint32_t)a->v << 16) | (uint32_t)a->u;
-            *w++ = _gpu_count12((uint32_t)a->count);
-            *w++ = 0u;
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        /* On RV32 the six-byte {u,v,count} records already have wire order.
+         * Reuse the callers' count scan to prove that clamping is unnecessary.
+         * Bulk copies pay off for larger, word-aligned batches on Pocket.
+         * Direct packing below handles short/two-byte-aligned lists without
+         * memcpy setup cost. The odd tail still has a whole zero record. */
+        if (sizeof(*records) == 6u && (counts_or & ~0xFFFu) == 0u
+                && record_count >= 16u && ((uintptr_t)records & 3u) == 0u) {
+            uint32_t bytes = record_count * 6u;
+            __builtin_memcpy(w, records, bytes);
+            if (record_count & 1u)
+                __builtin_memset((uint8_t *)w + bytes, 0, 6u);
+        } else
+#endif
+        {
+            uint32_t pairs = record_count >> 1;
+            for (uint32_t i = 0; i < pairs; i++) {
+                const of_gpu_param_span_record_t *a = &records[2u * i];
+                const of_gpu_param_span_record_t *b = a + 1;
+                *w++ = ((uint32_t)a->v << 16) | (uint32_t)a->u;
+                *w++ = ((uint32_t)b->u << 16) | _gpu_count12((uint32_t)a->count);
+                *w++ = (_gpu_count12((uint32_t)b->count) << 16) | (uint32_t)b->v;
+            }
+            if (record_count & 1u) {
+                const of_gpu_param_span_record_t *a = &records[record_count - 1u];
+                *w++ = ((uint32_t)a->v << 16) | (uint32_t)a->u;
+                *w++ = _gpu_count12((uint32_t)a->count);
+                *w++ = 0u;
+            }
         }
         _gpu_ring_commit(3u * ((record_count + 1u) >> 1));
     }
@@ -1607,7 +1809,7 @@ of_gpu_draw_param_span_list(const of_gpu_param_span_list_t *params,
         any_pixels |= records[i].count;
 
     if (any_pixels != 0)
-        _gpu_emit_param_span_list(params, records, record_count);
+        _gpu_emit_param_span_list(params, records, record_count, any_pixels);
 }
 
 /* GPU_CMD_DRAW_PARAM_TRI — hardware edge walker.
@@ -2246,6 +2448,7 @@ typedef struct {
 } of_gpu_tri_state_t;
 
 static inline void     of_gpu_init(void)                                  {}
+static inline int      of_gpu_use_cpu_ring(void)                          { return 0; }
 static inline void     of_gpu_shutdown(void)                              {}
 static inline void     of_gpu_kick(void)                                  {}
 static inline void     of_gpu_kick_now(void)                              {}
