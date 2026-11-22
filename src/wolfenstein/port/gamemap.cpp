@@ -655,9 +655,16 @@ void GameMap::SetSpotTag(MapSpot spot, unsigned int tag)
 
 void GameMap::SetupLinks()
 {
-	// Allocate as one large block for locality.
-	const unsigned int zdSize = sizeof(bool)*zonePalette.Size()
-		+ sizeof(unsigned short)*((zonePalette.Size()*(zonePalette.Size()+1))>>1);
+	// Allocate as one large block for locality.  Each sub-array starts on a
+	// pointer-aligned offset: with an odd zone count the unpadded layout put
+	// the unsigned short table and the row-pointer array on odd addresses, so
+	// every CheckLink lookup made two misaligned loads (a trap plus kernel
+	// emulation each on RISC-V).
+	const size_t align = sizeof(unsigned short*);
+	const size_t traversedSize = (sizeof(bool)*zonePalette.Size() + align - 1) & ~(align - 1);
+	const size_t linksSize = (sizeof(unsigned short)*((zonePalette.Size()*(zonePalette.Size()+1))>>1)
+		+ align - 1) & ~(align - 1);
+	const size_t zdSize = traversedSize + linksSize;
 	byte* zoneData = new byte[zdSize + sizeof(unsigned short*)*zonePalette.Size()];
 	memset(zoneData, 0, zdSize);
 	zoneTraversed = reinterpret_cast<bool*>(zoneData);
@@ -667,7 +674,7 @@ void GameMap::SetupLinks()
 #endif
 
 	// Set up the table
-	unsigned short* ptr = reinterpret_cast<unsigned short*>(zoneData + sizeof(bool)*zonePalette.Size());
+	unsigned short* ptr = reinterpret_cast<unsigned short*>(zoneData + traversedSize);
 	zoneLinks = reinterpret_cast<unsigned short**>(zoneData+zdSize);
 	for(unsigned int i = 0;i < zonePalette.Size();++i)
 	{

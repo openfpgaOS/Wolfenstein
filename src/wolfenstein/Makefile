@@ -169,7 +169,7 @@ copy: all
 package: all
 	@$(ROOT)/scripts/package.sh $(APP)
 
-test: app_pc
+test: app_pc_wolf
 
 clean: sdk-clean
 	rm -rf $(OUT)
@@ -231,3 +231,33 @@ game-dist: $(OBJ_DIR)/app.elf
 	@chmod +x "$(GAME_STAGE)/$(GAME)/setup.sh"
 	@if [ -f "$(GAME_CSV)" ]; then cp "$(GAME_CSV)" "$(GAME_STAGE)/$(GAME)/external_files.csv"; fi
 	@echo "  game-dist staged -> $(GAME_STAGE) (one folder, variants: $(GAME_VARIANTS))"
+
+# ── Desktop (SDL2) build ─────────────────────────────────────────────
+# sdk.mk's generic app_pc rule compiles every C and C++ source in one
+# C++-driver command, which breaks this port: zlib/bzip2 are K&R C (invalid
+# C++) and the C++ sources need PC_CXXFLAGS (-Dstricmp, -std=gnu++11).  Build
+# the desktop binary from per-file objects instead, C with the C compiler and
+# C++ with the C++ flags, from the PC_* source lists defined above.
+PC_OBJ_DIR  = $(OBJ_DIR)/pc
+PC_C_OBJS   = $(patsubst %.c,$(PC_OBJ_DIR)/%.o,$(subst ../,__parent__/,$(PC_SRCS) $(SDK_DIR)/pc/of_sdl2.c $(OF_INIT_SRC)))
+PC_CXX_OBJS = $(patsubst %.cpp,$(PC_OBJ_DIR)/%.o,$(subst ../,__parent__/,$(PC_SRCS_CXX)))
+PC_BUILTIN_O = $(PC_OBJ_DIR)/builtin/ecwolf_builtin_data.o
+ALL_PC_CXXFLAGS = -DOF_PC -O2 -I$(SDK_DIR)/include -I. $(PC_CXXFLAGS) $(PC_EXTRA_CFLAGS) $(SDL_CFLAGS)
+
+$(PC_OBJ_DIR)/__parent__/%.o: ../%.c
+	@mkdir -p $(dir $@)
+	$(PC_CC) $(ALL_PC_CFLAGS) $(SDL_CFLAGS) -c -o $@ $<
+$(PC_OBJ_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(PC_CC) $(ALL_PC_CFLAGS) $(SDL_CFLAGS) -c -o $@ $<
+$(PC_OBJ_DIR)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(PC_CXX) $(ALL_PC_CXXFLAGS) -c -o $@ $<
+$(PC_BUILTIN_O): $(BUILTIN_PK3_C)
+	@mkdir -p $(dir $@)
+	$(PC_CC) -O2 -c -o $@ $<
+
+app_pc_wolf: $(PC_C_OBJS) $(PC_CXX_OBJS) $(PC_BUILTIN_O)
+	$(PC_CXX) -o app_pc $^ $(SDL_LIBS) $(PC_EXTRA_LIBS) -lm
+
+.PHONY: app_pc_wolf

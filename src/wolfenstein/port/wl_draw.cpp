@@ -1777,6 +1777,14 @@ void    ThreeDRefresh (void)
 		OF_WolfGPU_SetNextVideoFramePreserveExcludeRows(viewscreeny,
 			viewscreeny + viewheight);
 	}
+	else if(viewwidth > 0 && viewheight > 0)
+	{
+		// Bordered view: the GPU redraws the whole view rectangle, so the
+		// preserve copy only needs the border and status bar around it
+		// (it used to copy and flush the full 64 KB frame every frame).
+		OF_WolfGPU_SetNextVideoFramePreserveExcludeRect(viewscreenx,
+			viewscreeny, viewscreenx + viewwidth, viewscreeny + viewheight);
+	}
 #endif
 	perfStart = OF_WolfPerf_NowUS();
 	VH_AcquireDeferredScreenLock();

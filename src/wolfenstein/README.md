@@ -27,7 +27,9 @@ virtual root (`$PROGDIR` = `/`), where the bound slots are visible via
 
 Data-slot map (the firmware supports IDs up to 31; saves keep their fixed
 nonvolatile range 10-19, and slots 7/8 are the system Sound Bank / Shared
-Config, so the eight data files take 5, 6, 9 and 20-24):
+Config, so the eight data files take 5, 6 and 20-25; GAMEMAPS moved from 9
+to 25 because a data slot between the Shared Config and the saves shifted the
+APF datatable entries the save-size commit relies on):
 
 | Slot | Contents |
 |------|----------|
@@ -38,9 +40,10 @@ Config, so the eight data files take 5, 6, 9 and 20-24):
 | 5, 6 | `AUDIOHED`, `AUDIOT` |
 | 7 | `bank.ofsf` (MIDI SoundFont, preloaded by the SDK MIDI path) |
 | 8 | `ecwolf.cfg` (shared config, nonvolatile) |
-| 9 | `GAMEMAPS` |
 | 10-19 | per-instance `.ecs` saves, selected by `-saveprefix` |
 | 20-24 | `MAPHEAD`, `VGADICT`, `VGAGRAPH`, `VGAHEAD`, `VSWAP` |
+| 25 | `GAMEMAPS` |
+| 26 | `sfxcache.ofx` (pre-rendered AdLib SFX, optional) |
 
 Wolfenstein 3-D and Spear of Destiny use IMF/AdLib music in the original media,
 not Standard MIDI. The OpenFPGA build does not run the OPL emulator or convert
@@ -110,6 +113,21 @@ Base Wolf3D/Spear content keeps all walls/floor/sprites/weapon on the GPU and
 never falls back, so it stays on the fully asynchronous present path.
 
 This path is compile-verified but has not yet been validated on hardware.
+
+Wall, sprite, weapon and sky columns need the 0x4C column list
+(`OF_HW_GPU_COLUMN_LIST`) or the 0x48 compact span group
+(`OF_HW_GPU_SPAN_GROUP`); textured floor spans need the span group.  On a
+core without them the SDK drops those commands, so the renderer refuses such
+lanes and draws them on the CPU (clears, perspective planes and the page flip
+stay on the GPU).
+
+## Desktop build
+
+`make test CORE=wolfenstein` builds `src/wolfenstein/app_pc` (SDL2,
+SDL2_mixer) from per-file objects in `.obj/wolfenstein/pc/`.  Run it from a
+directory that holds the game data files and the engine data
+`.obj/wolfenstein/builtin/ecwolf.pk3`, e.g.
+`app_pc --data wl6 --nowait --tedlevel MAP01`.
 
 ## Saves
 

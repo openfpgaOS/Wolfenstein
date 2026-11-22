@@ -23,6 +23,10 @@ static bool gpu_frame_dirty;
 static uint8_t *gpu_framebuffer;
 static int gpu_pitch;
 static int gpu_height;
+/* [gpu_framebuffer, gpu_frame_hi): the active frame's byte range, computed
+ * once at BeginFrame for the per-column range test (empty when inactive). */
+static uintptr_t gpu_frame_lo;
+static uintptr_t gpu_frame_hi;
 
 static bool gpu_video_initialized;
 static bool gpu_video_acquire_pending;
@@ -40,6 +44,11 @@ static bool gpu_video_next_frame_preserve = true;
  * skip them.  Consumed (and reset) by the next buffer acquire. */
 static int gpu_video_preserve_skip_y0;
 static int gpu_video_preserve_skip_y1;
+/* Columns [skip_x0, skip_x1) of those rows are redrawn too (a bordered view
+ * narrower than the screen); the rest of each such row is still copied.
+ * 0 / INT_MAX = whole rows (full-width view). */
+static int gpu_video_preserve_skip_x0;
+static int gpu_video_preserve_skip_x1 = 0x7FFFFFFF;
 static bool gpu_video_clean_first_begin;
 static bool gpu_video_compat_logged;
 /* Last (width, height, pitch) validated against the hardware video mode.
@@ -114,6 +123,13 @@ static void gpu_record_present_pace(void)
 }
 
 static of_gpu_affine_span_group_t gpu_batch;
+/* Column batches (1-wide lanes with the 0x4C column list) are staged directly
+ * in the SDK's column-list struct, so a flush hands it over without a lane-by-
+ * lane copy.  gpu_batch_col says which of the two structs the open batch uses;
+ * the SDK reads only the first lane_count lanes, so lanes are written as they
+ * are added and never cleared. */
+static of_gpu_column_list_group_t gpu_col_batch;
+static bool gpu_batch_col;
 static int gpu_batch_count;
 static uint8_t gpu_batch_flags;
 static int gpu_batch_tex_width;
@@ -127,6 +143,14 @@ static int gpu_batch_fb_step;
  * (5-word lanes vs 7).  Output is byte-identical to the affine group, so the
  * affine path stays the fallback when the bit is clear. */
 static bool gpu_have_column_list;
+
+/* Set at init if the core decodes the 0x48 compact-direct lane form that
+ * of_gpu_draw_affine_span_group() emits (OF_HW_GPU_SPAN_GROUP).  Without it
+ * the SDK silently drops affine groups, so lanes that would need one (spans,
+ * or columns on a core without the column list) are refused here; the
+ * renderer then draws them on the CPU after a region sync, while clears,
+ * perspective planes and the page flip stay on the GPU. */
+static bool gpu_have_span_group;
 
 /* Set at init if the core supports parametric perspective span lists
  * (DRAW_PARAM_SPAN_LIST + perspective).  Lets a textured floor/ceiling half
@@ -392,38 +416,19 @@ static void gpu_flush_batch()
 	if(gpu_batch_count <= 0)
 		return;
 
-	gpu_batch.lane_count = (uint8_t)gpu_batch_count;
-
 	// 1-wide column batches (walls, sprites, sky) carry s == 0 / sstep == 0 on
-	// every lane, so emit them through the leaner 0x4C column-list when the core
-	// supports it.  The framebuffer result is byte-identical to the affine group
-	// (per of_gpu.h), and textured floor/ceiling spans (tex_width > 1) keep using
-	// the affine path.
-	if(gpu_have_column_list && gpu_batch_tex_width == 1)
+	// every lane, so they are staged as a 0x4C column list when the core
+	// supports it (gpu_batch_col).  The framebuffer result is byte-identical to
+	// the affine group (per of_gpu.h), and textured floor/ceiling spans
+	// (tex_width > 1) keep using the affine path.
+	if(gpu_batch_col)
 	{
-		of_gpu_column_list_group_t col;
-		col.lane_count = gpu_batch.lane_count;
-		col.flags = gpu_batch.flags;
-		col.reserved[0] = 0;
-		col.reserved[1] = 0;
-		col.tex_width = gpu_batch.tex_width;
-		col.tex_w_mask = gpu_batch.tex_w_mask;
-		col.tex_h_mask = gpu_batch.tex_h_mask;
-		col.fb_step = gpu_batch.fb_step;
-		for(int i = 0; i < gpu_batch_count; ++i)
-		{
-			col.fb_addr[i] = gpu_batch.fb_addr[i];
-			col.tex_addr[i] = gpu_batch.tex_addr[i];
-			col.count[i] = gpu_batch.count[i];
-			col.t[i] = gpu_batch.t[i];
-			col.tstep[i] = gpu_batch.tstep[i];
-			col.light[i] = gpu_batch.light[i];
-			col.colormap_id[i] = gpu_batch.colormap_id[i];
-		}
-		of_gpu_draw_column_list(&col);
+		gpu_col_batch.lane_count = (uint8_t)gpu_batch_count;
+		of_gpu_draw_column_list(&gpu_col_batch);
 	}
 	else
 	{
+		gpu_batch.lane_count = (uint8_t)gpu_batch_count;
 		of_gpu_draw_affine_span_group(&gpu_batch);
 	}
 	gpu_batch_count = 0;
@@ -433,6 +438,8 @@ static void gpu_flush_batch()
 static void gpu_reset_batch()
 {
 	memset(&gpu_batch, 0, sizeof(gpu_batch));
+	memset(&gpu_col_batch, 0, sizeof(gpu_col_batch));
+	gpu_batch_col = false;
 	gpu_batch_count = 0;
 	gpu_batch_flags = 0;
 	gpu_batch_tex_width = 0;
@@ -731,19 +738,6 @@ static void gpu_prepare_for_gpu_write(void)
 	gpu_clear_line_bits(gpu_cpu_valid_lines);
 }
 
-static bool gpu_can_batch(uint8_t flags, int tex_width, int tex_w_mask,
-	int tex_h_mask, int fb_step)
-{
-	if(gpu_batch_count <= 0)
-		return true;
-
-	return gpu_batch_flags == flags &&
-		gpu_batch_tex_width == tex_width &&
-		gpu_batch_tex_w_mask == tex_w_mask &&
-		gpu_batch_tex_h_mask == tex_h_mask &&
-		gpu_batch_fb_step == fb_step;
-}
-
 static bool gpu_region_within_active_frame(const uint8_t *dest, int count,
 	int fb_step)
 {
@@ -809,6 +803,61 @@ static bool gpu_rect_within_active_frame(const uint8_t *dest, int width,
 	return true;
 }
 
+static void gpu_open_batch(uint8_t flags, int tex_width, int tex_w_mask,
+	int tex_h_mask, int fb_step);
+
+/* Append one lane to the open batch (opening a new one when the batch key
+ * changes).  Callers have validated the primitive; the batching rules and the
+ * order of SDK calls are those of gpu_add_affine, so the command stream is
+ * unchanged. */
+static inline void gpu_append_lane(uint8_t *dest, int count,
+	const uint8_t *source, int source_len, int tex_width, int tex_w_mask,
+	int tex_h_mask, int sfrac, int tfrac, int sstep, int tstep, int light,
+	int fb_step, uint8_t flags)
+{
+	gpu_prepare_for_gpu_write();
+
+	if(gpu_batch_count > 0 &&
+		!(gpu_batch_flags == flags && gpu_batch_tex_width == tex_width &&
+		  gpu_batch_tex_w_mask == tex_w_mask &&
+		  gpu_batch_tex_h_mask == tex_h_mask && gpu_batch_fb_step == fb_step))
+	{
+		gpu_flush_batch();
+	}
+
+	if(gpu_batch_count == 0)
+		gpu_open_batch(flags, tex_width, tex_w_mask, tex_h_mask, fb_step);
+
+	gpu_make_source_visible(source, (uint32_t)source_len);
+
+	const unsigned lane = (unsigned)gpu_batch_count++;
+	if(gpu_batch_col)
+	{
+		gpu_col_batch.fb_addr[lane] = (uint32_t)(uintptr_t)dest;
+		gpu_col_batch.tex_addr[lane] = (uint32_t)(uintptr_t)source;
+		gpu_col_batch.count[lane] = (uint16_t)count;
+		gpu_col_batch.t[lane] = tfrac;
+		gpu_col_batch.tstep[lane] = tstep;
+		gpu_col_batch.light[lane] = (uint8_t)light;
+		gpu_col_batch.colormap_id[lane] = 0;
+	}
+	else
+	{
+		gpu_batch.fb_addr[lane] = (uint32_t)(uintptr_t)dest;
+		gpu_batch.tex_addr[lane] = (uint32_t)(uintptr_t)source;
+		gpu_batch.count[lane] = (uint16_t)count;
+		gpu_batch.s[lane] = sfrac;
+		gpu_batch.t[lane] = tfrac;
+		gpu_batch.sstep[lane] = sstep;
+		gpu_batch.tstep[lane] = tstep;
+		gpu_batch.light[lane] = (uint8_t)light;
+		gpu_batch.colormap_id[lane] = 0;
+	}
+
+	if(gpu_batch_count >= gpu_batch_max_lanes)
+		gpu_flush_batch();
+}
+
 static bool gpu_add_affine(uint8_t *dest, int count, const uint8_t *source,
 	int source_len, int tex_width, int tex_w_mask, int tex_h_mask,
 	int sfrac, int tfrac, int sstep, int tstep, int light, int fb_step,
@@ -828,46 +877,123 @@ static bool gpu_add_affine(uint8_t *dest, int count, const uint8_t *source,
 	}
 	if(!gpu_region_within_active_frame(dest, count, fb_step))
 		return gpu_reject();
+	if(!gpu_have_span_group && !(gpu_have_column_list && tex_width == 1))
+		return gpu_reject();
 
-	gpu_prepare_for_gpu_write();
+	gpu_append_lane(dest, count, source, source_len, tex_width, tex_w_mask,
+		tex_h_mask, sfrac, tfrac, sstep, tstep, light, fb_step, flags);
+	return true;
+}
 
-	if(!gpu_can_batch(flags, tex_width, tex_w_mask, tex_h_mask, fb_step))
-		gpu_flush_batch();
-
-	if(gpu_batch_count == 0)
+/* Open a batch with the given key (once per batch, out of line). */
+static void gpu_open_batch(uint8_t flags, int tex_width, int tex_w_mask,
+	int tex_h_mask, int fb_step)
+{
+	gpu_batch_flags = flags;
+	gpu_batch_tex_width = tex_width;
+	gpu_batch_tex_w_mask = tex_w_mask;
+	gpu_batch_tex_h_mask = tex_h_mask;
+	gpu_batch_fb_step = fb_step;
+	gpu_batch_col = gpu_have_column_list && tex_width == 1;
+	if(gpu_batch_col)
 	{
-		memset(&gpu_batch, 0, sizeof(gpu_batch));
+		gpu_col_batch.flags = flags;
+		gpu_col_batch.reserved[0] = 0;
+		gpu_col_batch.reserved[1] = 0;
+		gpu_col_batch.tex_width = (uint16_t)tex_width;
+		gpu_col_batch.tex_w_mask = (uint16_t)tex_w_mask;
+		gpu_col_batch.tex_h_mask = (uint16_t)tex_h_mask;
+		gpu_col_batch.fb_step = fb_step;
+	}
+	else
+	{
 		gpu_batch.flags = flags;
 		gpu_batch.tex_width = (uint16_t)tex_width;
 		gpu_batch.tex_w_mask = (uint16_t)tex_w_mask;
 		gpu_batch.tex_h_mask = (uint16_t)tex_h_mask;
 		gpu_batch.fb_step = fb_step;
-		gpu_batch_flags = flags;
-		gpu_batch_tex_width = tex_width;
-		gpu_batch_tex_w_mask = tex_w_mask;
-		gpu_batch_tex_h_mask = tex_h_mask;
-		gpu_batch_fb_step = fb_step;
+	}
+}
+
+/* 1-wide column with a power-of-two source of at most 1024 texels (callers
+ * check), inlined into each column entry point.  tex_width 1, tex_w_mask 0
+ * and tex_h_mask source_len - 1 pass gpu_add_affine's power-of-two tests by
+ * construction; fb_step is the frame pitch, so gpu_region_within_active_frame
+ * reduces to two compares against the range cached at BeginFrame.  The
+ * coherence and source-visibility helpers keep their early-out tests inline.
+ * Same checks, batching rules and SDK call order as gpu_add_affine, so the
+ * command stream is unchanged. */
+static inline __attribute__((always_inline)) bool gpu_add_column(
+	uint8_t *dest, int count, const uint8_t *source, int source_len,
+	int tfrac, int tstep, int light, uint8_t flags)
+{
+	if(!gpu_available || !gpu_frame_active)
+		return false;
+	if(dest == NULL || source == NULL || count <= 0 || count > 4095)
+		return gpu_reject();
+	if(light < 0 || light >= NUMCOLORMAPS)
+		return gpu_reject();
+	const uintptr_t first = (uintptr_t)dest;
+	if(first < gpu_frame_lo || first >= gpu_frame_hi)
+		return gpu_reject();
+	const uintptr_t last = first + (uintptr_t)(count - 1) * (uintptr_t)gpu_pitch;
+	if(last < first || last >= gpu_frame_hi)
+		return gpu_reject();
+	if(!gpu_have_column_list && !gpu_have_span_group)
+		return gpu_reject();
+
+	if(gpu_cpu_dirty)
+		gpu_prepare_for_gpu_write();
+
+	const int tex_h_mask = source_len - 1;
+	if(gpu_batch_count > 0 &&
+		!(gpu_batch_flags == flags && gpu_batch_tex_width == 1 &&
+		  gpu_batch_tex_w_mask == 0 && gpu_batch_tex_h_mask == tex_h_mask &&
+		  gpu_batch_fb_step == gpu_pitch))
+	{
+		gpu_flush_batch();
+	}
+	if(gpu_batch_count == 0)
+		gpu_open_batch(flags, 1, 0, tex_h_mask, gpu_pitch);
+
+	{
+		const uintptr_t s0 = (uintptr_t)source &
+			~(uintptr_t)(OF_GPU_CACHE_LINE_BYTES - 1);
+		const uintptr_t s1 = ((uintptr_t)source + (uint32_t)source_len +
+			OF_GPU_CACHE_LINE_BYTES - 1) &
+			~(uintptr_t)(OF_GPU_CACHE_LINE_BYTES - 1);
+		if(!(s0 >= gpu_source_cache_last.start &&
+			s1 <= gpu_source_cache_last.end))
+		{
+			gpu_make_source_visible(source, (uint32_t)source_len);
+		}
 	}
 
+	const unsigned lane = (unsigned)gpu_batch_count++;
+	if(gpu_batch_col)
+	{
+		gpu_col_batch.fb_addr[lane] = (uint32_t)first;
+		gpu_col_batch.tex_addr[lane] = (uint32_t)(uintptr_t)source;
+		gpu_col_batch.count[lane] = (uint16_t)count;
+		gpu_col_batch.t[lane] = tfrac;
+		gpu_col_batch.tstep[lane] = tstep;
+		gpu_col_batch.light[lane] = (uint8_t)light;
+		gpu_col_batch.colormap_id[lane] = 0;
+	}
+	else
+	{
+		gpu_batch.fb_addr[lane] = (uint32_t)first;
+		gpu_batch.tex_addr[lane] = (uint32_t)(uintptr_t)source;
+		gpu_batch.count[lane] = (uint16_t)count;
+		gpu_batch.s[lane] = 0;
+		gpu_batch.t[lane] = tfrac;
+		gpu_batch.sstep[lane] = 0;
+		gpu_batch.tstep[lane] = tstep;
+		gpu_batch.light[lane] = (uint8_t)light;
+		gpu_batch.colormap_id[lane] = 0;
+	}
 	if(gpu_batch_count >= gpu_batch_max_lanes)
 		gpu_flush_batch();
-
-	gpu_make_source_visible(source, (uint32_t)source_len);
-
-	unsigned lane = (unsigned)gpu_batch_count++;
-	gpu_batch.fb_addr[lane] = (uint32_t)(uintptr_t)dest;
-	gpu_batch.tex_addr[lane] = (uint32_t)(uintptr_t)source;
-	gpu_batch.count[lane] = (uint16_t)count;
-	gpu_batch.s[lane] = sfrac;
-	gpu_batch.t[lane] = tfrac;
-	gpu_batch.sstep[lane] = sstep;
-	gpu_batch.tstep[lane] = tstep;
-	gpu_batch.light[lane] = (uint8_t)light;
-	gpu_batch.colormap_id[lane] = 0;
-
-	if(gpu_batch_count >= gpu_batch_max_lanes)
-		gpu_flush_batch();
-
 	return true;
 }
 
@@ -892,14 +1018,18 @@ void OF_WolfGPU_Init(void)
 		gpu_available = true;
 		gpu_have_column_list =
 			of_has_feature(OF_HW_GPU_COLUMN_LIST) != 0;
+		gpu_have_span_group =
+			of_has_feature(OF_HW_GPU_SPAN_GROUP) != 0;
 		gpu_have_param_persp =
 			of_has_feature(OF_HW_GPU_PARAM_SPAN_LIST) != 0 &&
 			of_has_feature(OF_HW_GPU_PERSP) != 0 &&
 			getenv("OF_ECWOLF_NO_PERSP_FLOOR") == NULL;
 		gpu_reset_source_cache();
-		printf("OpenFPGA GPU: hardware command path enabled%s%s.\n",
+		printf("OpenFPGA GPU: hardware command path enabled%s%s%s.\n",
 			gpu_have_column_list ? " (column-list)" : "",
-			gpu_have_param_persp ? " (persp-planes)" : "");
+			gpu_have_param_persp ? " (persp-planes)" : "",
+			(gpu_have_column_list || gpu_have_span_group) ? "" :
+				" (no column/span command: CPU columns)");
 	}
 
 	if(!gpu_available || gpu_colormap_uploaded || NormalLight.Maps == NULL)
@@ -959,6 +1089,8 @@ void OF_WolfGPU_ResetVideoFrames(void)
 	gpu_video_frame_bytes = 0;
 	gpu_video_preserve_skip_y0 = 0;
 	gpu_video_preserve_skip_y1 = 0;
+	gpu_video_preserve_skip_x0 = 0;
+	gpu_video_preserve_skip_x1 = 0x7FFFFFFF;
 	gpu_video_mode_ok_w = 0;
 	gpu_video_mode_ok_h = 0;
 	gpu_video_mode_ok_pitch = 0;
@@ -1061,6 +1193,21 @@ void OF_WolfGPU_SetNextVideoFramePreserveExcludeRows(int y0, int y1)
 {
 	gpu_video_preserve_skip_y0 = y0;
 	gpu_video_preserve_skip_y1 = y1;
+	gpu_video_preserve_skip_x0 = 0;
+	gpu_video_preserve_skip_x1 = 0x7FFFFFFF;
+}
+
+/* The rectangle [x0, x1) x [y0, y1) of the next frame is fully redrawn by the
+ * renderer (a bordered 3D view): the preserve copy skips it and carries over
+ * only the rows above and below it and the border columns beside it.
+ * One-shot, like the row exclusion. */
+void OF_WolfGPU_SetNextVideoFramePreserveExcludeRect(int x0, int y0, int x1,
+	int y1)
+{
+	gpu_video_preserve_skip_y0 = y0;
+	gpu_video_preserve_skip_y1 = y1;
+	gpu_video_preserve_skip_x0 = x0;
+	gpu_video_preserve_skip_x1 = x1;
 }
 
 /* Smoothed display refresh period (us) and the number of refreshes the last
@@ -1098,9 +1245,13 @@ static bool gpu_acquire_video_draw_buffer(int width, int height)
 	const bool preserve = gpu_video_next_frame_preserve;
 	int skip_y0 = gpu_video_preserve_skip_y0;
 	int skip_y1 = gpu_video_preserve_skip_y1;
+	int skip_x0 = gpu_video_preserve_skip_x0;
+	int skip_x1 = gpu_video_preserve_skip_x1;
 	gpu_video_next_frame_preserve = true;
 	gpu_video_preserve_skip_y0 = 0;
 	gpu_video_preserve_skip_y1 = 0;
+	gpu_video_preserve_skip_x0 = 0;
+	gpu_video_preserve_skip_x1 = 0x7FFFFFFF;
 
 	int draw_idx;
 	if(!gpu_video_initialized)
@@ -1171,8 +1322,14 @@ static bool gpu_acquire_video_draw_buffer(int width, int height)
 			skip_y0 = 0;
 		if(skip_y1 > height)
 			skip_y1 = height;
+		/* The source is the previous frame, written by the GPU behind the
+		 * CPU cache (acquire_next waited for its flip fence, and its CPU
+		 * overlay lines were written back at present).  Drop any lines of it
+		 * the CPU still holds -- e.g. read by an earlier preserve copy before
+		 * the GPU last drew into that buffer -- so the copy reads SDRAM. */
 		if(skip_y0 >= skip_y1)
 		{
+			of_cache_inval_range(gpu_video_last_fb, frame_bytes);
 			memcpy(draw_fb, gpu_video_last_fb, frame_bytes);
 			of_cache_flush_range(draw_fb, frame_bytes);
 		}
@@ -1182,15 +1339,59 @@ static bool gpu_acquire_video_draw_buffer(int width, int height)
 			const uint32_t tail_off = (uint32_t)skip_y1 * (uint32_t)pitch;
 			if(head_bytes != 0)
 			{
+				of_cache_inval_range(gpu_video_last_fb, head_bytes);
 				memcpy(draw_fb, gpu_video_last_fb, head_bytes);
 				of_cache_flush_range(draw_fb, head_bytes);
 			}
 			if(tail_off < frame_bytes)
 			{
+				of_cache_inval_range(gpu_video_last_fb + tail_off,
+					frame_bytes - tail_off);
 				memcpy(draw_fb + tail_off, gpu_video_last_fb + tail_off,
 					frame_bytes - tail_off);
 				of_cache_flush_range(draw_fb + tail_off,
 					frame_bytes - tail_off);
+			}
+			/* Bordered view: the border columns beside the redrawn rows. */
+			if(skip_x0 < 0)
+				skip_x0 = 0;
+			if(skip_x1 > pitch)
+				skip_x1 = pitch;
+			if(skip_x0 < skip_x1 && (skip_x0 > 0 || skip_x1 < pitch))
+			{
+				/* Source lines of the band (view lines included: whole-band
+				 * invalidate, one service call; nothing in it is dirty). */
+				of_cache_inval_range(gpu_video_last_fb +
+					(uint32_t)skip_y0 * (uint32_t)pitch,
+					(uint32_t)(skip_y1 - skip_y0) * (uint32_t)pitch);
+				for(int y = skip_y0; y < skip_y1; ++y)
+				{
+					const uint32_t row = (uint32_t)y * (uint32_t)pitch;
+					if(skip_x0 > 0)
+						memcpy(draw_fb + row, gpu_video_last_fb + row,
+							(uint32_t)skip_x0);
+					if(skip_x1 < pitch)
+						memcpy(draw_fb + row + skip_x1,
+							gpu_video_last_fb + row + skip_x1,
+							(uint32_t)(pitch - skip_x1));
+				}
+				/* One write-back pass over the band instead of two service
+				 * calls per row: the view lines in it hold no dirty data
+				 * (this buffer's CPU lines were written back when it was last
+				 * presented) and the GPU has not been given this frame yet. */
+				const uint32_t mid_off = (uint32_t)skip_y0 * (uint32_t)pitch;
+				of_cache_flush_range(draw_fb + mid_off,
+					(uint32_t)(skip_y1 - skip_y0) * (uint32_t)pitch);
+			}
+			else if(skip_x0 >= skip_x1)
+			{
+				/* Empty column range: nothing in these rows is redrawn. */
+				const uint32_t mid_off = (uint32_t)skip_y0 * (uint32_t)pitch;
+				of_cache_inval_range(gpu_video_last_fb + mid_off,
+					tail_off - mid_off);
+				memcpy(draw_fb + mid_off, gpu_video_last_fb + mid_off,
+					tail_off - mid_off);
+				of_cache_flush_range(draw_fb + mid_off, tail_off - mid_off);
 			}
 		}
 	}
@@ -1265,6 +1466,7 @@ bool OF_WolfGPU_PresentVideoFrame(void)
 		gpu_frame_active = false;
 		gpu_frame_dirty = false;
 		gpu_framebuffer = NULL;
+		gpu_frame_lo = gpu_frame_hi = 0;
 		gpu_pitch = 0;
 		gpu_height = 0;
 		gpu_reset_batch();
@@ -1331,6 +1533,13 @@ void OF_WolfGPU_BeginFrame(uint8_t *framebuffer, int pitch, int height)
 	gpu_framebuffer = framebuffer;
 	gpu_pitch = pitch;
 	gpu_height = height;
+	{
+		const uintptr_t lo = (uintptr_t)framebuffer;
+		const uintptr_t hi = lo + (uintptr_t)(height - 1) * (uintptr_t)pitch +
+			(uintptr_t)pitch;
+		gpu_frame_lo = lo;
+		gpu_frame_hi = hi < lo ? lo : hi;   /* overflow: accept nothing */
+	}
 	gpu_frame_dirty = false;
 	gpu_frame_active = true;
 	gpu_reset_batch();
@@ -1410,6 +1619,7 @@ void OF_WolfGPU_EndFrame(void)
 	gpu_frame_active = false;
 	gpu_frame_dirty = false;
 	gpu_framebuffer = NULL;
+	gpu_frame_lo = gpu_frame_hi = 0;
 	gpu_pitch = 0;
 	gpu_height = 0;
 	gpu_reset_batch();
@@ -1530,9 +1740,8 @@ bool OF_WolfGPU_DrawColumn(uint8_t *dest, int count, const uint8_t *source,
 	if(!gpu_is_power_of_two(source_len) || source_len > 256)
 		return gpu_reject();
 
-	return gpu_add_affine(dest, count, source, source_len,
-		1, 0, source_len - 1,
-		0, texfrac, 0, texstep, light, gpu_pitch, OF_GPU_SPAN_COLORMAP);
+	return gpu_add_column(dest, count, source, source_len, texfrac, texstep,
+		light, OF_GPU_SPAN_COLORMAP);
 }
 
 bool OF_WolfGPU_DrawMaskedColumn(uint8_t *dest, int count,
@@ -1552,9 +1761,8 @@ bool OF_WolfGPU_DrawMaskedColumn(uint8_t *dest, int count,
 		return true;
 	if(maskState == 2)
 	{
-		return gpu_add_affine(dest, count, source, source_len,
-			1, 0, texmask, 0, texfrac, 0, texstep, light, gpu_pitch,
-			OF_GPU_SPAN_COLORMAP);
+		return gpu_add_column(dest, count, source, source_len, texfrac,
+			texstep, light, OF_GPU_SPAN_COLORMAP);
 	}
 
 	int run_start = -1;
@@ -1578,9 +1786,9 @@ bool OF_WolfGPU_DrawMaskedColumn(uint8_t *dest, int count,
 
 		if(run_count != 0)
 		{
-			if(!gpu_add_affine(dest + run_start * gpu_pitch, run_count,
-				source, source_len, 1, 0, texmask, 0, run_texfrac,
-				0, texstep, light, gpu_pitch, OF_GPU_SPAN_COLORMAP))
+			if(!gpu_add_column(dest + run_start * gpu_pitch, run_count,
+				source, source_len, run_texfrac, texstep, light,
+				OF_GPU_SPAN_COLORMAP))
 			{
 				return false;
 			}
@@ -1591,9 +1799,9 @@ bool OF_WolfGPU_DrawMaskedColumn(uint8_t *dest, int count,
 
 	if(run_count != 0)
 	{
-		if(!gpu_add_affine(dest + run_start * gpu_pitch, run_count,
-			source, source_len, 1, 0, texmask, 0, run_texfrac,
-			0, texstep, light, gpu_pitch, OF_GPU_SPAN_COLORMAP))
+		if(!gpu_add_column(dest + run_start * gpu_pitch, run_count,
+			source, source_len, run_texfrac, texstep, light,
+			OF_GPU_SPAN_COLORMAP))
 		{
 			return false;
 		}
@@ -1607,9 +1815,8 @@ bool OF_WolfGPU_DrawRawColumn(uint8_t *dest, int count,
 	if(!gpu_is_power_of_two(source_len) || source_len > 1024)
 		return gpu_reject();
 
-	return gpu_add_affine(dest, count, source, source_len,
-		1, 0, source_len - 1,
-		0, texfrac, 0, texstep, 0, gpu_pitch, 0);
+	return gpu_add_column(dest, count, source, source_len, texfrac, texstep,
+		0, 0);
 }
 
 void OF_WolfGPU_PreloadSource(const uint8_t *source, uint32_t bytes)
